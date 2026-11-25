@@ -67,6 +67,26 @@ st.markdown(
     .rail-source div {{ display: grid; gap: 1px; }}
     .rail-source b {{ font-size: 13.5px; }}
     .rail-source span {{ font-size: 12.5px; color: #c8d5ee !important; }}
+    [data-testid="stSidebar"] [data-testid="stElementContainer"]:has(.stButton), [data-testid="stSidebar"] .stButton {{ width: 100% !important; }}
+    [data-testid="stSidebar"] .stButton button {{ width: 100%; min-height: 44px; border-radius: 10px; border: 2px solid #fff;
+        background: #fff; transition: background-color .15s ease-out; }}
+    [data-testid="stSidebar"] .stButton button p {{ color: {BRAND}; font-weight: 750; font-size: 14.5px; }}
+    [data-testid="stSidebar"] .stButton button:hover {{ background: #e7edf8; }}
+    [data-testid="stSidebar"] .stButton button:disabled {{ opacity: .55; }}
+    [data-testid="stSidebar"] .st-key-reset_sim button {{ background: transparent; border-color: rgba(255,255,255,.4); min-height: 36px; }}
+    [data-testid="stSidebar"] .st-key-reset_sim button p {{ color: #fff; font-size: 13px; }}
+    [data-testid="stSidebar"] .st-key-reset_sim button:hover {{ background: rgba(255,255,255,.08); }}
+    .rail-h {{ font-size: 13px; font-weight: 800; color: #c8d5ee !important; margin: 18px 4px 6px; }}
+    .live {{ display: grid; gap: 6px; margin: 8px 0 6px; font-size: 12.5px; }}
+    .live span {{ color: #c8d5ee !important; }}
+    .live-track {{ height: 8px; border-radius: 4px; background: rgba(255,255,255,.18); overflow: hidden; }}
+    .live-track i {{ display: block; height: 100%; background: #ffb000; transition: width .5s ease-out; }}
+    .live-dot {{ display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #ffb000; margin-right: 6px;
+                 animation: pulse 1s ease-in-out infinite; }}
+    @keyframes pulse {{ 50% {{ opacity: .3; }} }}
+    @media (prefers-reduced-motion: reduce) {{ .live-dot {{ animation: none; }} .live-track i {{ transition: none; }} }}
+    .sim-pill {{ font-size: 12px; font-weight: 800; padding: 2px 8px; border-radius: 99px; background: #fff4d6;
+                 border: 2px solid #8a6100; color: #000; margin-left: 8px; vertical-align: 2px; }}
     .rail-foot {{ margin-top: 18px; font-size: 12px; color: #c8d5ee !important; line-height: 1.5; padding: 0 4px; }}
 
     /* page head */
@@ -118,7 +138,8 @@ st.markdown(
 )
 
 
-def head(title: str, lede: str, pill: str = "Superstore · Jan 2015 – Dec 2018"):
+def head(title: str, lede: str, pill: str | None = None):
+    pill = pill or DATA_PILL
     st.markdown(f'<div class="desk-head"><h1>{title}</h1><span class="source-pill">{pill}</span></div>'
                 f'<p class="desk-lede">{lede}</p>', unsafe_allow_html=True)
 
@@ -201,10 +222,9 @@ def segment_frame(df: pd.DataFrame, segment: str) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner="Training SARIMA model…")
-def sarima_results(segment: str):
+def sarima_results(segment: str, frame: pd.DataFrame):
     """Backtest on the last 3 months, then refit on all data and forecast 3 months ahead."""
-    df = load_data(DATA_PATH)
-    s = monthly(segment_frame(df, segment))
+    s = monthly(segment_frame(frame, segment))
     train, test = s.iloc[:-3], s.iloc[-3:]
     fit = SARIMAX(train, order=ORDER, seasonal_order=SEASONAL,
                   enforce_stationarity=False, enforce_invertibility=False).fit(disp=False)
@@ -223,8 +243,8 @@ def sarima_results(segment: str):
 
 
 @st.cache_data
-def weekly_anomalies() -> pd.DataFrame:
-    df = load_data(DATA_PATH)
+def weekly_anomalies(frame: pd.DataFrame) -> pd.DataFrame:
+    df = frame
     w = df.groupby(df["Order Date"].dt.to_period("W"))["Sales"].sum()
     w.index = w.index.to_timestamp()
     wd = w.reset_index()
@@ -238,12 +258,13 @@ def weekly_anomalies() -> pd.DataFrame:
 
 
 @st.cache_data
-def clusters() -> tuple:
-    df = load_data(DATA_PATH)
+def clusters(frame: pd.DataFrame) -> tuple:
+    df = frame
     sub = df.groupby("Sub-Category").agg(
         total_sales=("Sales", "sum"), avg_order_value=("Sales", "mean"),
         order_count=("Order ID", "nunique")).reset_index()
-    ys = df.groupby(["Sub-Category", "Year"])["Sales"].sum().unstack(fill_value=0)
+    full_years = [y for y, n in df.groupby("Year")["Month"].nunique().items() if n == 12]
+    ys = df[df["Year"].isin(full_years)].groupby(["Sub-Category", "Year"])["Sales"].sum().unstack(fill_value=0)
     sub["growth_rate"] = (((ys.iloc[:, -1] - ys.iloc[:, 0]) / (ys.iloc[:, 0] + 1)) * 100).values
     ms = df.groupby(["Sub-Category", df["Order Date"].dt.to_period("M")])["Sales"].sum().unstack(fill_value=0)
     sub["volatility"] = ms.std(axis=1).values
@@ -269,6 +290,80 @@ def clusters() -> tuple:
     return sub, pca.explained_variance_ratio_
 
 
+# ----------------------------------------------------------------- simulated import
+ORDER_LEVEL = ["Ship Mode", "Customer ID", "Customer Name", "Segment", "Country", "City", "State", "Postal Code", "Region"]
+TICK_SECONDS = 0.7
+TICKS_PER_MONTH = 14
+
+
+def simulate_month(base: pd.DataFrame, month: pd.Timestamp) -> pd.DataFrame:
+    """Fake order lines for one month: resampled from the same calendar month in past years, grown ~8-22%
+    year on year, with new order IDs, dates inside the month and noise on every line's sales value.
+    Seeded by the month, so the same month always produces the same orders."""
+    rng = np.random.default_rng(int(month.strftime("%Y%m")))
+    hist = base[base["Order Date"].dt.month == month.month]
+    recent = hist[hist["Year"] == hist["Year"].max()]
+    n_lines = max(40, int(len(recent) * rng.uniform(1.08, 1.22)))
+    lines = hist.iloc[rng.integers(0, len(hist), n_lines)].copy().reset_index(drop=True)
+    lines["Sales"] = (lines["Sales"] * rng.lognormal(0, 0.18, n_lines)).round(2)
+
+    sizes = []
+    while sum(sizes) < n_lines:
+        sizes.append(int(rng.choice([1, 2, 3, 4, 5], p=[.45, .25, .15, .1, .05])))
+    sizes[-1] -= sum(sizes) - n_lines
+    sizes = [k for k in sizes if k > 0]
+    first = np.cumsum([0] + sizes[:-1])
+    order_of_line = np.repeat(np.arange(len(sizes)), sizes)
+    for c in ORDER_LEVEL:
+        if c in lines:
+            lines[c] = lines[c].values[first][order_of_line]
+
+    lag = (lines["Ship Date"] - lines["Order Date"]).dt.days.values[first]
+    day = rng.integers(0, pd.Period(month, "M").days_in_month, len(sizes))
+    order_date = month + pd.to_timedelta(day, unit="D")
+    lines["Order Date"] = order_date[order_of_line]
+    lines["Ship Date"] = (order_date + pd.to_timedelta(lag, unit="D"))[order_of_line]
+    ids = rng.choice(np.arange(100000, 1000000), len(sizes), replace=False)
+    lines["Order ID"] = [f"CA-{month.year}-{ids[k]}" for k in order_of_line]
+    lines["Year"], lines["Month"] = month.year, month.month
+    return lines.sort_values(["Order Date", "Order ID"]).reset_index(drop=True)
+
+
+def init_sim():
+    for k, v in {"sim_done": [], "sim_live": None, "sim_queue": None, "sim_month": None, "sim_tick": 0.0}.items():
+        st.session_state.setdefault(k, v)
+
+
+def start_import(model_frame: pd.DataFrame):
+    month = (model_frame["Order Date"].max().to_period("M") + 1).to_timestamp()
+    rows = simulate_month(BASE_DF, month)
+    if "Row ID" in rows:
+        rows["Row ID"] = np.arange(len(rows)) + int(model_frame["Row ID"].max()) + 1
+    st.session_state.sim_month = month
+    st.session_state.sim_queue = rows
+    st.session_state.sim_live = rows.iloc[:0]
+    st.session_state.sim_tick = 0.0
+
+
+def pump():
+    """Runs every tick while an import is streaming: moves the next batch of order lines into the data."""
+    import time
+    q = st.session_state.sim_queue
+    if q is None:
+        return
+    now = time.time()
+    if now - st.session_state.sim_tick < TICK_SECONDS * 0.9:
+        return
+    st.session_state.sim_tick = now
+    n = max(1, int(np.ceil((len(q) + len(st.session_state.sim_live)) / TICKS_PER_MONTH)))
+    st.session_state.sim_live = pd.concat([st.session_state.sim_live, q.iloc[:n]], ignore_index=True)
+    st.session_state.sim_queue = q.iloc[n:]
+    if st.session_state.sim_queue.empty:
+        st.session_state.sim_done.append(st.session_state.sim_live)
+        st.session_state.sim_live, st.session_state.sim_queue, st.session_state.sim_month = None, None, None
+    st.rerun()
+
+
 # ----------------------------------------------------------------- load or ask for data
 DATA_PATH = find_data()
 if DATA_PATH is None:
@@ -280,11 +375,20 @@ if DATA_PATH is None:
         st.rerun()
     st.stop()
 
-df = load_data(DATA_PATH)
-missing = REQUIRED - set(df.columns)
+BASE_DF = load_data(DATA_PATH)
+missing = REQUIRED - set(BASE_DF.columns)
 if missing:
     st.error(f"This CSV is missing required columns: {', '.join(sorted(missing))}. Use the Superstore train.csv.")
     st.stop()
+
+init_sim()
+STREAMING = st.session_state.sim_queue is not None
+# model_df: base + fully imported months (feeds the models); df: plus the month that is still streaming in
+model_df = pd.concat([BASE_DF, *st.session_state.sim_done], ignore_index=True) if st.session_state.sim_done else BASE_DF
+df = pd.concat([model_df, st.session_state.sim_live], ignore_index=True) if STREAMING else model_df
+N_SIM = len(df) - len(BASE_DF)
+D0, D1 = df["Order Date"].min(), df["Order Date"].max()
+DATA_PILL = f"Superstore · {D0:%b %Y} – {D1:%b %Y}"
 
 fmt_money = st.column_config.NumberColumn(format="$%,.0f")
 
@@ -294,18 +398,36 @@ with st.sidebar:
                 '<div class="rail-sub">Sales forecasting for a US retailer</div>', unsafe_allow_html=True)
     page = st.radio("Page", ["Sales overview", "Forecast", "Anomalies", "Demand segments"],
                     label_visibility="collapsed")
+    st.markdown('<div class="rail-h">Live data</div>', unsafe_allow_html=True)
+    nxt = (model_df["Order Date"].max().to_period("M") + 1).to_timestamp()
+    if STREAMING:
+        live, total = len(st.session_state.sim_live), len(st.session_state.sim_live) + len(st.session_state.sim_queue)
+        st.markdown(f'<div class="live"><b><i class="live-dot"></i>Importing {st.session_state.sim_month:%B %Y}</b>'
+                    f'<div class="live-track"><i style="width:{live / total:.0%}"></i></div>'
+                    f'<span>{live} of {total} order lines · ${st.session_state.sim_live["Sales"].sum():,.0f}</span></div>',
+                    unsafe_allow_html=True)
+        st.button("Importing…", disabled=True, key="import_sim")
+    elif st.button(f"Import {nxt:%B %Y} orders", key="import_sim"):
+        start_import(model_df)
+        st.rerun()
+    if st.session_state.sim_done or STREAMING:
+        if st.button("Remove imported data", key="reset_sim"):
+            for k in ["sim_done", "sim_live", "sim_queue", "sim_month", "sim_tick"]:
+                del st.session_state[k]
+            st.rerun()
+    sim_note = f" + {N_SIM:,} simulated" if N_SIM else ""
     st.markdown(
         '<div class="rail-source">'
-        '<div><b>Data</b><span>Superstore train.csv · 9,800 order lines</span></div>'
+        f'<div><b>Data</b><span>Superstore train.csv · {len(BASE_DF):,} order lines{sim_note}</span></div>'
         '<div><b>Forecast model</b><span>SARIMA (1,1,1)(1,1,1,12)</span></div>'
-        '<div><b>Backtest</b><span>Trained to Sep 2018, scored Oct – Dec 2018</span></div>'
+        f'<div><b>Backtest</b><span>Scored on the last 3 complete months</span></div>'
         '</div>'
         '<div class="rail-foot">Muhammed Al Hameed M<br>AI &amp; Data Science Intern, XYlofy AI</div>',
         unsafe_allow_html=True)
 
 # ----------------------------------------------------------------- sales overview
 if page == "Sales overview":
-    head("Sales overview", "Four years of orders by region and category. The filters scope every figure on this page.")
+    head("Sales overview", f"Orders from {D0:%B %Y} to {D1:%B %Y} by region and category. The filters scope every figure on this page.")
     c1, c2 = st.columns(2)
     regions = c1.multiselect("Region", sorted(df["Region"].unique()), default=sorted(df["Region"].unique()))
     cats = c2.multiselect("Category", sorted(df["Category"].unique()), default=sorted(df["Category"].unique()))
@@ -315,28 +437,56 @@ if page == "Sales overview":
         st.stop()
 
     yr = f.groupby("Year")["Sales"].sum()
-    growth = (yr.get(2018, 0) / yr.get(2017, 1) - 1) * 100
+    full_years = [y for y, n in f.groupby("Year")["Month"].nunique().items() if n == 12]
+    y1, y0 = (full_years[-1], full_years[-2]) if len(full_years) >= 2 else (yr.index[-1], yr.index[0])
+    growth = (yr.get(y1, 0) / yr.get(y0, 1) - 1) * 100
     m = monthly(f)
     peak = m.groupby(m.index.month).mean()
     hi, lo = pd.Timestamp(2000, int(peak.idxmax()), 1), pd.Timestamp(2000, int(peak.idxmin()), 1)
     report([
-        ("Total sales", f"${f['Sales'].sum():,.0f}", "Jan 2015 – Dec 2018", False),
+        ("Total sales", f"${f['Sales'].sum():,.0f}", f"{D0:%b %Y} – {D1:%b %Y}", False),
         ("Orders", f"{f['Order ID'].nunique():,}", f"${f.groupby('Order ID')['Sales'].sum().mean():,.0f} per order", False),
         ("Customers", f"{f['Customer ID'].nunique():,}", "Distinct customer IDs", False),
-        ("2018 vs 2017", f"{growth:+.1f}%", "Change in yearly sales", True),
+        (f"{y1} vs {y0}", f"{growth:+.1f}%", "Change in yearly sales, full years", True),
     ], note=f"{hi:%B} is the busiest month on average and {lo:%B} the quietest, "
             f"{peak.max() / peak.min():.1f}× apart. Stock should start building in September.")
 
+    sims = [*st.session_state.sim_done] + ([st.session_state.sim_live] if STREAMING else [])
+    if sims:
+        cur = sims[-1]
+        month = st.session_state.sim_month if STREAMING else cur["Order Date"].min().to_period("M").to_timestamp()
+        cur = cur[cur["Region"].isin(regions) & cur["Category"].isin(cats)]
+        status = "importing now" if STREAMING else "imported"
+        with st.container(border=True):
+            st.markdown(f'<div class="panel-h">{month:%B %Y}<span class="sim-pill">Simulated · {status}</span></div>'
+                        f'<div class="panel-sub">{cur["Order ID"].nunique():,} orders · {len(cur):,} order lines · '
+                        f'${cur["Sales"].sum():,.0f} so far. Every chart and figure on every page includes these rows.</div>',
+                        unsafe_allow_html=True)
+            a, b = st.columns([3, 2], gap="medium")
+            days = pd.date_range(month, month + pd.offsets.MonthEnd(0), freq="D")
+            daily = cur.groupby(cur["Order Date"].dt.normalize())["Sales"].sum().reindex(days, fill_value=0)
+            fig = go.Figure(go.Bar(x=daily.index, y=daily.values, marker_color=AMBER,
+                                   hovertemplate="%{x|%d %b}: $%{y:,.0f}<extra></extra>"))
+            fig.update_yaxes(tickprefix="$")
+            fig.update_xaxes(range=[days[0] - pd.Timedelta(hours=18), days[-1] + pd.Timedelta(hours=18)], tickformat="%d %b")
+            a.plotly_chart(style(fig, height=230), width="stretch")
+            latest = cur.tail(7).iloc[::-1]
+            b.dataframe(pd.DataFrame({"Date": latest["Order Date"].dt.strftime("%d %b"), "Order": latest["Order ID"],
+                                      "Sub-category": latest["Sub-Category"], "Region": latest["Region"],
+                                      "Sales": latest["Sales"].round(0)}),
+                        hide_index=True, width="stretch", height=8 * 35 + 3, column_config={"Sales": fmt_money})
+        st.write("")
+
     a, b = st.columns([1, 2], gap="medium")
     with a.container(border=True):
-        panel_head("Sales by year", "US dollars")
+        panel_head("Sales by year", "US dollars" + (" · latest year is partial" if len(full_years) < len(yr) else ""))
         fig = go.Figure(go.Bar(x=yr.index.astype(str), y=yr.values, marker_color=BRAND, text=yr.values,
                                texttemplate="$%{text:,.0f}", textposition="outside", cliponaxis=False,
                                hovertemplate="%{x}: $%{y:,.0f}<extra></extra>"))
         fig.update_yaxes(range=[0, yr.max() * 1.16], tickprefix="$")
         st.plotly_chart(style(fig), width="stretch")
     with b.container(border=True):
-        panel_head("Sales by month", "Each point is one calendar month")
+        panel_head("Sales by month", "Each point is one calendar month" + (" · the last point is still importing" if STREAMING else ""))
         fig = go.Figure(go.Scatter(x=m.index, y=m.values, mode="lines+markers", line=dict(color=BRAND, width=2),
                                    marker=dict(size=4), hovertemplate="%{x|%b %Y}: $%{y:,.0f}<extra></extra>"))
         fig.update_yaxes(tickprefix="$")
@@ -352,7 +502,7 @@ if page == "Sales overview":
         fig.update_yaxes(tickprefix="$")
         st.plotly_chart(style(fig), width="stretch")
     with b.container(border=True):
-        panel_head("Top 10 sub-categories", "Total sales over four years")
+        panel_head("Top 10 sub-categories", f"Total sales, {D0:%b %Y} – {D1:%b %Y}")
         sc = f.groupby("Sub-Category")["Sales"].sum().sort_values().tail(10)
         fig = go.Figure(go.Bar(x=sc.values, y=sc.index, orientation="h", marker_color=BLUE, text=sc.values,
                                texttemplate="$%{text:,.0f}", textposition="outside", cliponaxis=False,
@@ -368,7 +518,7 @@ elif page == "Forecast":
     options = ["All sales", "Furniture", "Office Supplies", "Technology", "Central", "East", "South", "West"]
     seg = c1.selectbox("Category or region", options, index=0)
     h = c2.select_slider("Months ahead", options=[1, 2, 3], value=3)
-    s, fc, ci, mae, rmse, mape, test, bt = sarima_results(seg)
+    s, fc, ci, mae, rmse, mape, test, bt = sarima_results(seg, model_df)
     fc, ci = fc.iloc[:h], ci.iloc[:h]
 
     report([
@@ -376,8 +526,9 @@ elif page == "Forecast":
         ("MAE", f"${mae:,.0f}", "Average miss per month", True),
         ("RMSE", f"${rmse:,.0f}", "Weights large misses more", True),
         ("MAPE", f"{mape:.1f}%", "Average miss as a share", True),
-    ], note="Error figures come from the backtest: the model was trained to September 2018 and scored on "
-            "October to December 2018, the peak quarter. The forecast itself uses all 48 months.")
+    ], note=f"Error figures come from the backtest: the model was trained to {s.index[-4]:%B %Y} and scored on "
+            f"{test.index[0]:%B} to {test.index[-1]:%B %Y}. The forecast itself uses all {len(s)} months."
+            + (" The month that is still importing joins the model once it is complete." if STREAMING else ""))
 
     with st.container(border=True):
         panel_head(f"{seg}: last 24 months and the next {h}",
@@ -405,7 +556,7 @@ elif page == "Forecast":
         st.dataframe(out, hide_index=True, width="stretch",
                      column_config={c: fmt_money for c in ["Forecast", "Low", "High"]})
     with b.container(border=True):
-        panel_head("Backtest", "Actual against predicted, Oct – Dec 2018")
+        panel_head("Backtest", f"Actual against predicted, {test.index[0]:%b} – {test.index[-1]:%b %Y}")
         bt_df = pd.DataFrame({"Month": test.index.strftime("%b %Y"), "Actual": test.values.round(0),
                               "Predicted": bt.values.round(0)})
         st.dataframe(bt_df, hide_index=True, width="stretch",
@@ -414,11 +565,11 @@ elif page == "Forecast":
 # ----------------------------------------------------------------- anomalies
 elif page == "Anomalies":
     head("Anomalies", "Weeks where sales broke from their normal pattern, found by two separate methods.")
-    wd = weekly_anomalies()
+    wd = weekly_anomalies(df)
     both = int((wd["iso"] & wd["zflag"]).sum())
     report([
         ("Weeks checked", f"{len(wd)}", "Weekly sales totals", False),
-        ("Isolation Forest", f"{int(wd['iso'].sum())}", "Unusual against all four years", False),
+        ("Isolation Forest", f"{int(wd['iso'].sum())}", "Unusual against the whole history", False),
         ("Rolling z-score", f"{int(wd['zflag'].sum())}", "Unusual against the 8 weeks around it", False),
         ("Flagged by both", f"{both}", "Check these first", True),
     ], note="Isolation Forest is set to expect 5% unusual weeks. The z-score flags a week more than two standard "
@@ -458,7 +609,7 @@ elif page == "Anomalies":
 # ----------------------------------------------------------------- demand segments
 else:
     head("Demand segments", "The 17 sub-categories grouped by how they sell, each with its own stocking rule.")
-    sub, ev = clusters()
+    sub, ev = clusters(model_df)
     order = ["High volume, high volatility", "Growing, frequently bought", "Low volume, high value", "Low volume, mature"]
     cells = ""
     for name in order:
@@ -496,3 +647,7 @@ else:
         st.dataframe(t, hide_index=True, width="stretch", height=(len(t) + 1) * 35 + 3,
                      column_config={"Total sales": fmt_money, "Monthly spread": fmt_money,
                                     "Stocking rule": st.column_config.TextColumn(width="large")})
+
+# ----------------------------------------------------------------- live import ticker
+if STREAMING:
+    st.fragment(run_every=TICK_SECONDS)(pump)()
