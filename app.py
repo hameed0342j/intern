@@ -17,6 +17,10 @@ import streamlit as st
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.ensemble import IsolationForest
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score, roc_curve
+from sklearn.model_selection import StratifiedKFold, cross_val_predict
+from sklearn.pipeline import make_pipeline
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.preprocessing import StandardScaler
 from statsmodels.tsa.statespace.sarimax import SARIMAX
@@ -373,6 +377,54 @@ def weak_spots(frame: pd.DataFrame):
     return w, cat_growth, heat
 
 
+CHURN_DAYS = 180
+CHURN_FEATS = ["Recency (days)", "Orders", "Spend", "Average order", "Tenure (days)", "Categories"]
+
+
+def rfm(frame: pd.DataFrame, cut: pd.Timestamp) -> pd.DataFrame:
+    """Recency, frequency, monetary and related features using only orders on or before `cut`."""
+    h = frame[frame["Order Date"] <= cut]
+    g = h.drop_duplicates("Order ID").groupby("Customer ID")
+    spend = h.groupby("Customer ID")["Sales"].sum()
+    n = g.size()
+    first, last = g["Order Date"].min(), g["Order Date"].max()
+    X = pd.DataFrame({"Recency (days)": (cut - last).dt.days, "Orders": n, "Spend": spend, "Average order": spend / n,
+                      "Tenure (days)": (cut - first).dt.days,
+                      "Categories": h.groupby("Customer ID")["Category"].nunique()})
+    X["Usual gap (days)"] = (last - first).dt.days / (n - 1).replace(0, np.nan)
+    return X
+
+
+@st.cache_data(show_spinner="Scoring customers…")
+def churn(frame: pd.DataFrame) -> dict:
+    """Churned = no order in the CHURN_DAYS after a cut-off. Features come only from before the cut-off."""
+    end = frame["Order Date"].max()
+    cut = end - pd.Timedelta(days=CHURN_DAYS)
+    X = rfm(frame, cut)
+    returned = frame.loc[frame["Order Date"] > cut, "Customer ID"].unique()
+    y = (~X.index.isin(returned)).astype(int)
+    model = make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000))
+    Xm = np.log1p(X[CHURN_FEATS])
+    p = cross_val_predict(model, Xm, y, cv=StratifiedKFold(5, shuffle=True, random_state=42), method="predict_proba")[:, 1]
+    fpr, tpr, _ = roc_curve(y, p)
+    model.fit(Xm, y)
+    info = frame.drop_duplicates("Customer ID").set_index("Customer ID")[["Customer Name", "Segment", "Region"]]
+    bt = X.assign(churned=y * 100).join(info)
+    bt["band"] = pd.qcut(bt["Recency (days)"].rank(method="first"), 4,
+                         labels=["Most recent 25%", "Second 25%", "Third 25%", "Least recent 25%"])
+    now = rfm(frame, end).join(info)
+    now["Churn probability"] = model.predict_proba(np.log1p(now[CHURN_FEATS]))[:, 1] * 100
+    now["Overdue ×"] = now["Recency (days)"] / now["Usual gap (days)"].fillna(365)
+    now["Last 12 months"] = (frame[frame["Order Date"] > end - pd.Timedelta(days=365)]
+                             .groupby("Customer ID")["Sales"].sum().reindex(now.index).fillna(0))
+    now["At risk"] = (now["Recency (days)"] > 90) & (now["Overdue ×"] > 1.5)
+    return dict(auc=roc_auc_score(y, p), fpr=fpr, tpr=tpr, rate=y.mean() * 100, cut=cut, end=end, n=len(y),
+                by_band=bt.groupby("band", observed=True)["churned"].mean(),
+                by_seg=bt.groupby("Segment")["churned"].mean().sort_values(),
+                by_reg=bt.groupby("Region")["churned"].mean().sort_values(),
+                coefs=pd.Series(model[-1].coef_[0], index=CHURN_FEATS).sort_values(), now=now)
+
+
 @st.cache_data
 def load_games():
     for p in [APP_DIR / "vgsales.csv", APP_DIR / "data" / "vgsales.csv", Path.cwd() / "vgsales.csv"]:
@@ -498,7 +550,7 @@ with st.sidebar:
     st.markdown('<div class="rail-brand">Demand Intelligence</div>'
                 '<div class="rail-sub">Sales forecasting for a US retailer</div>', unsafe_allow_html=True)
     page = st.radio("Page", ["Sales overview", "Forecast", "Anomalies", "Demand segments", "Weak spots",
-                             "Games market"],
+                             "Customer churn", "Games market"],
                     label_visibility="collapsed")
     st.markdown('<div class="rail-h">Live data</div>', unsafe_allow_html=True)
     nxt = (model_df["Order Date"].max().to_period("M") + 1).to_timestamp()
@@ -755,6 +807,101 @@ elif page == "Weak spots":
             f'<div><div class="t"><i style="background:{RED}"></i>{r["Sub-Category"]}<span>{r["Category"]}</span></div>'
             f'<p class="why">{r["why"]}</p><ul>{"".join(f"<li>{a}</li>" for a in r["actions"])}</ul></div>'
             for _, r in weak.iterrows()) + "</div>", unsafe_allow_html=True)
+
+# ----------------------------------------------------------------- churn
+elif page == "Customer churn":
+    head("Customer churn", f"Which customers stop buying. Churned means no order in the {CHURN_DAYS} days after a cut-off date.")
+    c = churn(model_df)
+    now = c["now"]
+    risk = now[now["At risk"]].sort_values("Last 12 months", ascending=False)
+    report([
+        ("Customers", f"{c['n']:,}", f"Scored at the cut-off, {c['cut']:%d %b %Y}", False),
+        ("Churn rate", f"{c['rate']:.0f}%", f"No order from {c['cut']:%b %Y} to {c['end']:%b %Y}", False),
+        ("Model AUC", f"{c['auc']:.2f}", "0.50 is chance, 1.00 is perfect", True),
+        ("At risk now", f"{len(risk)}", f"${risk['Last 12 months'].sum():,.0f} spent in the last 12 months", True),
+    ], note=(f"Backtest: a logistic regression on six order-history features, scored with 5-fold cross-validation and "
+             f"using only orders before the cut-off. An AUC of {c['auc']:.2f} means "
+             + ("order history barely predicts who comes back in this data, so the at-risk list below uses a "
+                "transparent rule instead of the model: no order for 90+ days and 1.5× longer than the customer's "
+                "usual gap between orders." if c["auc"] < 0.6 else
+                "the model ranks churners above returners better than chance.")))
+
+    a, b = st.columns(2, gap="medium")
+    with a.container(border=True):
+        panel_head("ROC curve", "How well the model separates churners from returners",
+                   legend={"Model": BRAND, "Chance": LINE})
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode="lines", line=dict(color=LINE, dash="dot"), hoverinfo="skip"))
+        fig.add_trace(go.Scatter(x=c["fpr"], y=c["tpr"], mode="lines", line=dict(color=BRAND, width=2.5),
+                                 hovertemplate="False alarms %{x:.0%}<br>Churners caught %{y:.0%}<extra></extra>"))
+        fig.update_xaxes(title="False alarm rate", tickformat=".0%", range=[0, 1])
+        fig.update_yaxes(title="Churners caught", tickformat=".0%", range=[0, 1])
+        show(fig, height=320)
+    with b.container(border=True):
+        panel_head("Churn rate by recency", "Customers split into quarters by days since their last order at the cut-off")
+        bb = c["by_band"]
+        fig = go.Figure(go.Bar(x=bb.index.astype(str), y=bb.values, marker_color=[BLUE, BLUE, AMBER, RED], text=bb.values,
+                               texttemplate="%{text:.0f}%", textposition="outside", cliponaxis=False,
+                               hovertemplate="%{x}: %{y:.0f}% churned<extra></extra>"))
+        fig.update_yaxes(ticksuffix="%", range=[0, max(bb.max() * 1.3, 10)])
+        show(fig, height=320)
+
+    a, b = st.columns(2, gap="medium")
+    with a.container(border=True):
+        panel_head("Churn rate by segment and region", "Share of each group with no order after the cut-off")
+        grp = pd.concat([c["by_seg"].rename(lambda s: f"{s} (segment)"), c["by_reg"].rename(lambda s: f"{s} (region)")])
+        fig = go.Figure(go.Bar(x=grp.values, y=grp.index, orientation="h", text=grp.values, texttemplate="%{text:.0f}%",
+                               textposition="outside", cliponaxis=False,
+                               marker_color=[BRAND if "segment" in i else BLUE for i in grp.index],
+                               hovertemplate="%{y}: %{x:.0f}%<extra></extra>"))
+        fig.update_xaxes(ticksuffix="%", range=[0, grp.max() * 1.25])
+        fig.update_yaxes(showgrid=False)
+        show(fig, height=320)
+    with b.container(border=True):
+        panel_head("What the model leans on", "Standardised coefficients: right pushes towards churn, left towards returning",
+                   legend={"Raises churn": RED, "Lowers churn": GREEN})
+        co = c["coefs"]
+        fig = go.Figure(go.Bar(x=co.values, y=co.index, orientation="h",
+                               marker_color=[RED if v > 0 else GREEN for v in co.values],
+                               hovertemplate="%{y}: %{x:+.2f}<extra></extra>"))
+        fig.update_xaxes(zeroline=True, zerolinecolor=LINE_STRONG, zerolinewidth=1.5)
+        fig.update_yaxes(showgrid=False)
+        show(fig, height=320)
+
+    with st.container(border=True):
+        top = risk.head(15).iloc[::-1]
+        panel_head("At-risk customers by value", f"Top {len(top)} of {len(risk)} overdue customers, ranked by what they "
+                                                 f"spent in the last 12 months")
+        fig = go.Figure(go.Bar(x=top["Last 12 months"], y=top["Customer Name"], orientation="h", marker_color=RED,
+                               text=top["Last 12 months"], texttemplate="$%{text:,.0f}", textposition="outside",
+                               cliponaxis=False, customdata=np.stack([top["Recency (days)"], top["Segment"]], axis=1),
+                               hovertemplate="<b>%{y}</b><br>%{customdata[1]}<br>Last order %{customdata[0]} days ago"
+                                             "<br>Spent $%{x:,.0f} in 12 months<extra></extra>"))
+        fig.update_xaxes(range=[0, top["Last 12 months"].max() * 1.25], showticklabels=False, showline=False)
+        fig.update_yaxes(showgrid=False)
+        show(fig, height=460)
+        t = risk[["Customer Name", "Segment", "Region", "Recency (days)", "Usual gap (days)", "Last 12 months",
+                  "Churn probability"]].copy()
+        t["Usual gap (days)"] = t["Usual gap (days)"].round(0)
+        st.dataframe(t, hide_index=True, width="stretch", height=8 * 35 + 3,
+                     column_config={"Last 12 months": fmt_money,
+                                    "Churn probability": st.column_config.NumberColumn("Model churn %", format="%.0f%%")})
+
+    with st.container(border=True):
+        panel_head("What to do")
+        seg_hi = c["by_seg"].idxmax()
+        st.markdown(
+            '<div class="actions">'
+            f'<div><div class="t"><i style="background:{RED}"></i>Win back the top accounts</div><ul>'
+            f'<li>Call the {min(15, len(risk))} highest-value overdue customers this month.</li>'
+            f'<li>Offer them a discount on the category they buy most.</li></ul></div>'
+            f'<div><div class="t"><i style="background:{AMBER}"></i>Watch the {seg_hi} segment</div><ul>'
+            f'<li>It has the highest churn rate, {c["by_seg"].max():.0f}%.</li>'
+            f'<li>Send a reorder reminder when a customer passes their usual gap between orders.</li></ul></div>'
+            f'<div><div class="t"><i style="background:{BLUE}"></i>Test before scaling</div><ul>'
+            f'<li>Contact half of the at-risk list and hold back the other half.</li>'
+            f'<li>Compare how many in each half order again within 90 days.</li></ul></div>'
+            '</div>', unsafe_allow_html=True)
 
 # ----------------------------------------------------------------- games
 elif page == "Games market":
