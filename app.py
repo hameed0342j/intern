@@ -22,7 +22,7 @@ from sklearn.preprocessing import StandardScaler
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 warnings.filterwarnings("ignore")
-st.set_page_config(page_title="Demand Intelligence", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Demand Intelligence", layout="wide", initial_sidebar_state="auto")
 
 # ----------------------------------------------------------------- tokens
 # Flat and ruled: white ground, #eef1f5 panels, 2px borders, one navy brand colour.
@@ -131,7 +131,36 @@ st.markdown(
     [data-baseweb="tag"] {{ background: {BRAND} !important; border-radius: 6px !important; }}
     [data-testid="stDataFrame"] {{ border: 1px solid #d5dbe3; border-radius: 8px; }}
     [data-testid="stCaptionContainer"] p {{ color: {INK2}; font-size: 13px; }}
+    .actions {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; margin: 6px 0 4px; }}
+    .actions > div {{ border: 2px solid {LINE}; border-radius: 10px; padding: 12px 14px; background: #fff; }}
+    .actions .t {{ margin: 0 0 4px; padding: 0; font-size: 15px; font-weight: 800; color: {INK}; display: flex; align-items: center;
+                   gap: 8px; flex-wrap: wrap; }}
+    .actions .t i {{ width: 10px; height: 10px; border-radius: 2px; flex: none; }}
+    .actions .t span {{ font-size: 12px; font-weight: 750; color: {INK2}; border: 1.5px solid {LINE}; border-radius: 99px; padding: 0 8px; }}
+    .actions .why {{ font-size: 13.5px; color: {INK2}; margin: 0 0 6px; }}
+    .actions ul {{ margin: 0; padding-left: 18px; font-size: 13.5px; color: {INK}; }}
+    .actions li {{ margin-bottom: 3px; }}
     #MainMenu, footer {{ visibility: hidden; }}
+
+    /* phones */
+    @media (max-width: 700px) {{
+        .block-container {{ padding: 3.2rem .75rem 2.5rem; }}
+        .desk-head {{ flex-wrap: wrap; gap: 6px; }}
+        .desk-head h1 {{ font-size: 22px; }}
+        .source-pill {{ margin-left: 0; font-size: 11.5px; }}
+        .desk-lede {{ font-size: 13.5px; }}
+        .report {{ grid-auto-flow: row; grid-template-columns: 1fr 1fr; }}
+        .report > div {{ padding: 8px 10px 10px; }}
+        .report b {{ font-size: 21px; }}
+        .report em, .report span {{ font-size: 11.5px; }}
+        .report-note {{ font-size: 12.5px; }}
+        .segs {{ grid-template-columns: 1fr; }}
+        .actions {{ grid-template-columns: 1fr; }}
+        .panel-h {{ font-size: 15px; }}
+        .legend {{ font-size: 11.5px; gap: 2px 10px; }}
+        [data-testid="stVerticalBlockBorderWrapper"] {{ padding: 10px 8px !important; }}
+        [data-testid="stHorizontalBlock"] {{ gap: .75rem !important; }}
+    }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -174,6 +203,13 @@ def style(fig, height=340):
     fig.update_yaxes(showgrid=True, gridcolor="#e3e8ef", showline=False, ticks="", zeroline=False,
                      title_font=dict(size=12.5))
     return fig
+
+
+PCFG = {"displayModeBar": False, "responsive": True, "scrollZoom": False}
+
+
+def show(fig, height=340, where=None):
+    (where or st).plotly_chart(style(fig, height), width="stretch", config=PCFG)
 
 
 # ----------------------------------------------------------------- data
@@ -290,6 +326,71 @@ def clusters(frame: pd.DataFrame) -> tuple:
     return sub, pca.explained_variance_ratio_
 
 
+@st.cache_data
+def weak_spots(frame: pd.DataFrame):
+    """Sub-categories that grew 10+ points slower than their category (or shrank), with a reason and actions."""
+    full_years = sorted(y for y, n in frame.groupby("Year")["Month"].nunique().items() if n == 12)
+    f0, f1 = full_years[0], full_years[-1]
+    fy = frame[frame["Year"].isin([f0, f1])]
+    sub = fy.pivot_table(index=["Category", "Sub-Category"], columns="Year", values="Sales", aggfunc="sum", fill_value=0)
+    cat = fy.pivot_table(index="Category", columns="Year", values="Sales", aggfunc="sum")
+    cat_growth = (cat[f1] / cat[f0] - 1) * 100
+    w = sub.reset_index()
+    w["growth"] = (w[f1] / w[f0].replace(0, np.nan) - 1) * 100
+    w["cat_growth"] = w["Category"].map(cat_growth)
+    w["gap"] = w["growth"] - w["cat_growth"]
+    w["weak"] = (w["gap"] <= -10) | (w["growth"] < 0)
+
+    reg = fy.pivot_table(index=["Category", "Sub-Category"], columns=["Region", "Year"], values="Sales",
+                         aggfunc="sum", fill_value=0)
+    regions = sorted(frame["Region"].unique())
+    heat = pd.DataFrame({r: (reg[(r, f1)] / reg[(r, f0)].replace(0, np.nan) - 1) * 100 for r in regions}).fillna(0)
+    heat = heat.sort_index()
+
+    ms = frame.groupby(["Sub-Category", frame["Order Date"].dt.to_period("M")])["Sales"].sum().unstack(fill_value=0)
+    cv = ms.std(axis=1) / ms.mean(axis=1)
+    w["cv"] = w["Sub-Category"].map(cv)
+    leader = w.sort_values("growth").groupby("Category").tail(1).set_index("Category")["Sub-Category"]
+    whys, acts = [], []
+    for _, r in w.iterrows():
+        h = heat.loc[(r["Category"], r["Sub-Category"])]
+        wr, wv, br, bv = h.idxmin(), h.min(), h.idxmax(), h.max()
+        lead = leader[r["Category"]]
+        weak_region = f"weakest in {wr} ({wv:+.0f}%)"
+        if r["growth"] < 0:
+            whys.append(f"Sales fell {abs(r['growth']):.0f}% while {r['Category']} grew {r['cat_growth']:+.0f}%; {weak_region}.")
+            a = ["Review price and range against competitors and drop the slowest-selling products.",
+                 f"Bundle it with {lead}, the fastest grower in {r['Category']}."]
+        else:
+            whys.append(f"Grew {r['growth']:+.0f}% against {r['cat_growth']:+.0f}% for {r['Category']}, "
+                        f"{abs(r['gap']):.0f} points behind; {weak_region}.")
+            a = [f"Cross-sell it with {lead} at checkout and in promotions."]
+        a.append(f"Target {wr} first; copy what works in {br} ({bv:+.0f}%).")
+        a.append("Demand is erratic: hold extra safety stock and promote in quiet months." if r["cv"] > cv.median()
+                 else "Demand is steady: a price or range refresh will help more than stocking changes.")
+        acts.append(a)
+    w["why"], w["actions"] = whys, acts
+    return w, cat_growth, heat
+
+
+@st.cache_data
+def load_games():
+    for p in [APP_DIR / "vgsales.csv", APP_DIR / "data" / "vgsales.csv", Path.cwd() / "vgsales.csv"]:
+        if p.is_file():
+            g = pd.read_csv(p).dropna(subset=["Year"])
+            g["Year"] = g["Year"].astype(int)
+            return g[g["Year"] <= 2016]
+    return None
+
+
+def genre_momentum(g: pd.DataFrame, col: str) -> pd.DataFrame:
+    e = g[(g["Year"] >= 2005) & (g["Year"] <= 2010)].groupby("Genre")[col].sum()
+    l_ = g[(g["Year"] >= 2011) & (g["Year"] <= 2016)].groupby("Genre")[col].sum()
+    m = pd.DataFrame({"early": e / e.sum() * 100, "late": l_ / l_.sum() * 100}).fillna(0)
+    m["change"] = m["late"] - m["early"]
+    return m.sort_values("change")
+
+
 # ----------------------------------------------------------------- simulated import
 ORDER_LEVEL = ["Ship Mode", "Customer ID", "Customer Name", "Segment", "Country", "City", "State", "Postal Code", "Region"]
 TICK_SECONDS = 0.7
@@ -396,7 +497,8 @@ fmt_money = st.column_config.NumberColumn(format="$%,.0f")
 with st.sidebar:
     st.markdown('<div class="rail-brand">Demand Intelligence</div>'
                 '<div class="rail-sub">Sales forecasting for a US retailer</div>', unsafe_allow_html=True)
-    page = st.radio("Page", ["Sales overview", "Forecast", "Anomalies", "Demand segments"],
+    page = st.radio("Page", ["Sales overview", "Forecast", "Anomalies", "Demand segments", "Weak spots",
+                             "Games market"],
                     label_visibility="collapsed")
     st.markdown('<div class="rail-h">Live data</div>', unsafe_allow_html=True)
     nxt = (model_df["Order Date"].max().to_period("M") + 1).to_timestamp()
@@ -469,7 +571,7 @@ if page == "Sales overview":
                                    hovertemplate="%{x|%d %b}: $%{y:,.0f}<extra></extra>"))
             fig.update_yaxes(tickprefix="$")
             fig.update_xaxes(range=[days[0] - pd.Timedelta(hours=18), days[-1] + pd.Timedelta(hours=18)], tickformat="%d %b")
-            a.plotly_chart(style(fig, height=230), width="stretch")
+            a.plotly_chart(style(fig, height=230), width="stretch", config=PCFG)
             latest = cur.tail(7).iloc[::-1]
             b.dataframe(pd.DataFrame({"Date": latest["Order Date"].dt.strftime("%d %b"), "Order": latest["Order ID"],
                                       "Sub-category": latest["Sub-Category"], "Region": latest["Region"],
@@ -484,13 +586,13 @@ if page == "Sales overview":
                                texttemplate="$%{text:,.0f}", textposition="outside", cliponaxis=False,
                                hovertemplate="%{x}: $%{y:,.0f}<extra></extra>"))
         fig.update_yaxes(range=[0, yr.max() * 1.16], tickprefix="$")
-        st.plotly_chart(style(fig), width="stretch")
+        st.plotly_chart(style(fig), width="stretch", config=PCFG)
     with b.container(border=True):
         panel_head("Sales by month", "Each point is one calendar month" + (" · the last point is still importing" if STREAMING else ""))
         fig = go.Figure(go.Scatter(x=m.index, y=m.values, mode="lines+markers", line=dict(color=BRAND, width=2),
                                    marker=dict(size=4), hovertemplate="%{x|%b %Y}: $%{y:,.0f}<extra></extra>"))
         fig.update_yaxes(tickprefix="$")
-        st.plotly_chart(style(fig), width="stretch")
+        st.plotly_chart(style(fig), width="stretch", config=PCFG)
 
     a, b = st.columns(2, gap="medium")
     with a.container(border=True):
@@ -500,7 +602,7 @@ if page == "Sales overview":
         fig.update_traces(hovertemplate="%{x}: $%{y:,.0f}<extra></extra>", marker_line_width=0)
         fig.update_layout(xaxis_title=None, yaxis_title=None)
         fig.update_yaxes(tickprefix="$")
-        st.plotly_chart(style(fig), width="stretch")
+        st.plotly_chart(style(fig), width="stretch", config=PCFG)
     with b.container(border=True):
         panel_head("Top 10 sub-categories", f"Total sales, {D0:%b %Y} – {D1:%b %Y}")
         sc = f.groupby("Sub-Category")["Sales"].sum().sort_values().tail(10)
@@ -509,7 +611,7 @@ if page == "Sales overview":
                                hovertemplate="%{y}: $%{x:,.0f}<extra></extra>"))
         fig.update_xaxes(range=[0, sc.max() * 1.22], showticklabels=False, showline=False)
         fig.update_yaxes(showgrid=False)
-        st.plotly_chart(style(fig), width="stretch")
+        st.plotly_chart(style(fig), width="stretch", config=PCFG)
 
 # ----------------------------------------------------------------- forecast
 elif page == "Forecast":
@@ -546,7 +648,7 @@ elif page == "Forecast":
                                  mode="lines+markers", line=dict(color=AMBER, width=2, dash="dash"), marker=dict(size=7),
                                  hovertemplate="%{x|%b %Y}: $%{y:,.0f}<extra>Forecast</extra>"))
         fig.update_yaxes(tickprefix="$")
-        st.plotly_chart(style(fig, height=400), width="stretch")
+        st.plotly_chart(style(fig, height=400), width="stretch", config=PCFG)
 
     a, b = st.columns([3, 2], gap="medium")
     with a.container(border=True):
@@ -592,7 +694,7 @@ elif page == "Anomalies":
                                  marker=dict(color="#fff", size=10, line=dict(color=AMBER, width=2.5)),
                                  hovertemplate="%{x|%d %b %Y}: $%{y:,.0f}<extra>Z-score</extra>"))
         fig.update_yaxes(tickprefix="$")
-        st.plotly_chart(style(fig, height=400), width="stretch")
+        st.plotly_chart(style(fig, height=400), width="stretch", config=PCFG)
 
     flagged = wd[wd["iso"] | wd["zflag"]].copy()
     flagged["Flagged by"] = np.where(flagged["iso"] & flagged["zflag"], "Both",
@@ -605,6 +707,154 @@ elif page == "Anomalies":
         panel_head("Flagged weeks", f"{len(flagged)} weeks, oldest first")
         st.dataframe(flagged[["Week of", "Sales", "Against 8-week mean", "Flagged by"]], hide_index=True,
                      width="stretch", height=(len(flagged) + 1) * 35 + 3, column_config={"Sales": fmt_money})
+
+# ----------------------------------------------------------------- weak spots
+elif page == "Weak spots":
+    head("Weak spots", "Sub-categories growing slower than their own category, where they are weakest, and what to do about it.")
+    w, cat_growth, heat = weak_spots(model_df)
+    weak = w[w["weak"]].sort_values("gap")
+    report([
+        ("Furniture", f"{cat_growth['Furniture']:+.0f}%", "Category growth, first to last full year", False),
+        ("Office Supplies", f"{cat_growth['Office Supplies']:+.0f}%", "Category growth, first to last full year", False),
+        ("Technology", f"{cat_growth['Technology']:+.0f}%", "Category growth, first to last full year", False),
+        ("Weak spots", f"{len(weak)}", "Behind their category by 10+ points, or shrinking", True),
+    ], note="A sub-category is a weak spot when it grew at least 10 percentage points slower than its own category, "
+            "or when its sales fell. Growth compares the first and last full years in the data.")
+
+    with st.container(border=True):
+        panel_head("Growth against its own category",
+                   "Percentage points above or below the category's growth, grouped Furniture, Office Supplies, Technology. Red bars are weak spots.",
+                   legend={"Weak spot": RED, "Keeping pace or ahead": GREEN})
+        wc = w.sort_values(["Category", "gap"], ascending=[True, True])
+        labels = list(wc["Sub-Category"])
+        fig = go.Figure(go.Bar(x=wc["gap"], y=labels, orientation="h",
+                               marker_color=[RED if k else GREEN for k in wc["weak"]],
+                               customdata=np.stack([wc["growth"], wc["cat_growth"]], axis=1),
+                               hovertemplate="<b>%{y}</b><br>Own growth %{customdata[0]:+.0f}%"
+                                             "<br>Category %{customdata[1]:+.0f}%<br>Gap %{x:+.0f} pts<extra></extra>"))
+        fig.update_xaxes(ticksuffix=" pts", zeroline=True, zerolinecolor=LINE_STRONG, zerolinewidth=1.5, showgrid=True,
+                         gridcolor="#eef2f7")
+        fig.update_yaxes(showgrid=False, autorange="reversed")
+        show(fig, height=520)
+
+    with st.container(border=True):
+        panel_head("Growth by region", "Sales growth for each sub-category in each region, first to last full year. "
+                                       "Red cells are shrinking.")
+        fig = go.Figure(go.Heatmap(
+            z=heat.values.clip(-100, 200), x=heat.columns, y=[s for c, s in heat.index],
+            text=[[f"{v:+.0f}%" for v in row] for row in heat.values], texttemplate="%{text}",
+            textfont=dict(size=10.5), colorscale=[[0, RED], [1 / 3, "#ffffff"], [1, GREEN]], zmin=-100, zmax=200,
+            showscale=False, xgap=2, ygap=2, hovertemplate="%{y}, %{x}: %{text}<extra></extra>"))
+        fig.update_yaxes(autorange="reversed", showgrid=False)
+        fig.update_xaxes(side="top", showline=False)
+        show(fig, height=560)
+
+    with st.container(border=True):
+        panel_head("What to do about each weak spot", "Actions follow from why each one is weak")
+        st.markdown('<div class="actions">' + "".join(
+            f'<div><div class="t"><i style="background:{RED}"></i>{r["Sub-Category"]}<span>{r["Category"]}</span></div>'
+            f'<p class="why">{r["why"]}</p><ul>{"".join(f"<li>{a}</li>" for a in r["actions"])}</ul></div>'
+            for _, r in weak.iterrows()) + "</div>", unsafe_allow_html=True)
+
+# ----------------------------------------------------------------- games
+elif page == "Games market":
+    head("Games market", "The second data source: 16,598 video game titles with unit sales by region, 1980 – 2016.",
+         "VGChartz · units in millions")
+    g = load_games()
+    if g is None:
+        st.info("vgsales.csv was not found next to app.py, so the games pages cannot be shown.")
+        st.stop()
+    REG = {"Global": "Global_Sales", "North America": "NA_Sales", "Europe": "EU_Sales", "Japan": "JP_Sales",
+           "Other": "Other_Sales"}
+    c1, c2 = st.columns([1, 2])
+    region = c1.selectbox("Region", list(REG), index=0)
+    y0, y1 = c2.select_slider("Release years", options=list(range(1980, 2017)), value=(1995, 2016))
+    col = REG[region]
+    gf = g[(g["Year"] >= y0) & (g["Year"] <= y1)]
+    genre = gf.groupby("Genre")[col].sum().sort_values()
+    plat = gf.groupby("Platform")[col].sum().sort_values().tail(10)
+    report([
+        ("Titles", f"{len(gf):,}", f"Released {y0} – {y1}", False),
+        ("Units sold", f"{gf[col].sum():,.0f}M", f"{region} sales", False),
+        ("Top genre", genre.index[-1], f"{genre.iloc[-1]:,.0f}M units, {genre.iloc[-1] / genre.sum():.0%} of the total", False),
+        ("Top platform", plat.index[-1], f"{plat.iloc[-1]:,.0f}M units", True),
+    ], note="Sales are in millions of units, not dollars. Titles from 2016 onwards are incomplete in the source data.")
+
+    with st.container(border=True):
+        panel_head("Units sold by release year", "Stacked by region",
+                   legend={"North America": BRAND, "Europe": BLUE, "Japan": RED, "Other": LINE})
+        yr = gf.groupby("Year")[["NA_Sales", "EU_Sales", "JP_Sales", "Other_Sales"]].sum()
+        fig = go.Figure()
+        for c, name, colr in [("NA_Sales", "North America", BRAND), ("EU_Sales", "Europe", BLUE),
+                              ("JP_Sales", "Japan", RED), ("Other_Sales", "Other", LINE)]:
+            fig.add_trace(go.Bar(x=yr.index, y=yr[c], name=name, marker_color=colr,
+                                 hovertemplate=f"%{{x}} · {name}: %{{y:,.1f}}M<extra></extra>"))
+        fig.update_layout(barmode="stack", bargap=0.15)
+        fig.update_yaxes(ticksuffix="M")
+        show(fig, height=330)
+
+    a, b = st.columns(2, gap="medium")
+    with a.container(border=True):
+        panel_head("Units by genre", f"{region}, {y0} – {y1}")
+        fig = go.Figure(go.Bar(x=genre.values, y=genre.index, orientation="h", marker_color=BRAND, text=genre.values,
+                               texttemplate="%{text:,.0f}M", textposition="outside", cliponaxis=False,
+                               hovertemplate="%{y}: %{x:,.1f}M<extra></extra>"))
+        fig.update_xaxes(range=[0, genre.max() * 1.22], showticklabels=False, showline=False)
+        fig.update_yaxes(showgrid=False)
+        show(fig, height=400)
+    with b.container(border=True):
+        panel_head("Where each genre sells", "Share of each genre's units by region",
+                   legend={"North America": BRAND, "Europe": BLUE, "Japan": RED, "Other": LINE})
+        mix = gf.groupby("Genre")[["NA_Sales", "EU_Sales", "JP_Sales", "Other_Sales"]].sum()
+        mix = mix.div(mix.sum(axis=1), axis=0).loc[genre.index] * 100
+        fig = go.Figure()
+        for c, name, colr in [("NA_Sales", "North America", BRAND), ("EU_Sales", "Europe", BLUE),
+                              ("JP_Sales", "Japan", RED), ("Other_Sales", "Other", LINE)]:
+            fig.add_trace(go.Bar(x=mix[c], y=mix.index, orientation="h", name=name, marker_color=colr,
+                                 hovertemplate=f"%{{y}} · {name}: %{{x:.0f}}%<extra></extra>"))
+        fig.update_layout(barmode="stack", bargap=0.25)
+        fig.update_xaxes(ticksuffix="%", range=[0, 100])
+        fig.update_yaxes(showgrid=False)
+        show(fig, height=400)
+
+    mom = genre_momentum(g, col)
+    a, b = st.columns(2, gap="medium")
+    with a.container(border=True):
+        panel_head("Rising and falling genres",
+                   "Change in share of units, 2011–16 against 2005–10. Red genres are losing share.",
+                   legend={"Losing share": RED, "Gaining share": GREEN})
+        fig = go.Figure(go.Bar(x=mom["change"], y=mom.index, orientation="h",
+                               marker_color=[RED if v < 0 else GREEN for v in mom["change"]],
+                               customdata=np.stack([mom["early"], mom["late"]], axis=1),
+                               hovertemplate="<b>%{y}</b><br>2005–10: %{customdata[0]:.1f}%<br>2011–16: "
+                                             "%{customdata[1]:.1f}%<br>Change %{x:+.1f} pts<extra></extra>"))
+        fig.update_xaxes(ticksuffix=" pts", zeroline=True, zerolinecolor=LINE_STRONG, zerolinewidth=1.5)
+        fig.update_yaxes(showgrid=False)
+        show(fig, height=400)
+    with b.container(border=True):
+        panel_head("Top 10 platforms", f"{region}, {y0} – {y1}")
+        fig = go.Figure(go.Bar(x=plat.values, y=plat.index, orientation="h", marker_color=BLUE, text=plat.values,
+                               texttemplate="%{text:,.0f}M", textposition="outside", cliponaxis=False,
+                               hovertemplate="%{y}: %{x:,.1f}M<extra></extra>"))
+        fig.update_xaxes(range=[0, plat.max() * 1.22], showticklabels=False, showline=False)
+        fig.update_yaxes(showgrid=False)
+        show(fig, height=400)
+
+    falling = mom[mom["change"] < 0].sort_values("change")
+    rising = mom[mom["change"] > 0].sort_values("change", ascending=False)
+    with st.container(border=True):
+        panel_head("Weak genres and what to do", f"{region} sales")
+        cards = ""
+        for gen, r in falling.head(4).iterrows():
+            best = mix.loc[gen].idxmax() if gen in mix.index else "NA_Sales"
+            best_name = {"NA_Sales": "North America", "EU_Sales": "Europe", "JP_Sales": "Japan",
+                         "Other_Sales": "other markets"}[best]
+            cards += (f'<div><div class="t"><i style="background:{RED}"></i>{gen}<span>{r["change"]:+.1f} pts of share</span></div>'
+                      f'<p class="why">Fell from {r["early"]:.1f}% to {r["late"]:.1f}% of units.</p><ul>'
+                      f'<li>Cut new titles in this genre; keep only proven franchises.</li>'
+                      f'<li>Focus launches on {best_name}, where it still sells best.</li>'
+                      f'<li>Move budget towards {", ".join(rising.index[:2])}, which are gaining share.</li></ul></div>')
+        st.markdown(f'<div class="actions">{cards}</div>', unsafe_allow_html=True)
 
 # ----------------------------------------------------------------- demand segments
 else:
@@ -635,7 +885,7 @@ else:
                           hovertemplate="<b>%{customdata[0]}</b><br>Sales $%{customdata[1]:,.0f}"
                                         "<br>Growth %{customdata[2]:.0f}%<extra></extra>")
         fig.update_layout(xaxis_title="PC1", yaxis_title="PC2")
-        st.plotly_chart(style(fig, height=470), width="stretch")
+        st.plotly_chart(style(fig, height=470), width="stretch", config=PCFG)
 
     t = sub[["Sub-Category", "segment", "total_sales", "growth_rate", "volatility", "strategy"]].copy()
     t.columns = ["Sub-category", "Cluster", "Total sales", "Growth 2015–18", "Monthly spread", "Stocking rule"]
