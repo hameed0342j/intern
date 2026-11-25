@@ -22,99 +22,136 @@ from sklearn.preprocessing import StandardScaler
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 warnings.filterwarnings("ignore")
-st.set_page_config(page_title="Demand Intelligence System", page_icon="📈", layout="wide",
-                   initial_sidebar_state="expanded")
+st.set_page_config(page_title="Demand Intelligence", layout="wide", initial_sidebar_state="expanded")
 
-# ----------------------------------------------------------------- palette & constants
-NAVY, BLUE, ORANGE, GREEN, RED, GREY = "#1b365d", "#2f6fb0", "#e67e22", "#27ae60", "#c0392b", "#94a3b8"
-CAT_COLORS = {"Furniture": NAVY, "Office Supplies": ORANGE, "Technology": GREEN}
+# ----------------------------------------------------------------- tokens
+# Flat and ruled: white ground, #eef1f5 panels, 2px borders, one navy brand colour.
+BRAND, BLUE, AMBER, RED, GREEN = "#0b2e6b", "#0b55b3", "#c98500", "#a30014", "#17621f"
+INK, INK2, LINE, LINE_STRONG, SURFACE = "#0a0a0a", "#2a2f37", "#8b95a3", "#4a5462", "#eef1f5"
+CAT_COLORS = {"Furniture": BRAND, "Office Supplies": AMBER, "Technology": GREEN}
+SEG_COLORS = {"High volume, high volatility": RED, "Growing, frequently bought": GREEN,
+              "Low volume, high value": BRAND, "Low volume, mature": LINE}
+FONT = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'
 ORDER = (1, 1, 1)
 SEASONAL = (1, 1, 1, 12)
 
-# ----------------------------------------------------------------- styling
 st.markdown(
-    """
+    f"""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-    html, body, [class*="css"], .stMarkdown, .stText, .stDataFrame { font-family: 'Inter', sans-serif; }
-    .block-container { padding-top: 3.4rem; padding-bottom: 2.5rem; max-width: 1400px; }
+    html, body, [class*="css"], .stApp, .stMarkdown, button, input, select, textarea {{ font-family: {FONT}; }}
+    .stApp {{ background: #fff; color: {INK}; }}
+    .block-container {{ padding: 3.2rem 2rem 3.5rem; max-width: 1360px; }}
+    .stApp ::selection {{ background: #c9dbff; color: {INK}; }}
 
-    /* hero header */
-    .hero { background: linear-gradient(120deg, #1b365d 0%, #2f6fb0 100%); color: #fff;
-            padding: 1.35rem 1.7rem; border-radius: 16px; margin-bottom: 1.2rem;
-            box-shadow: 0 8px 24px rgba(27,54,93,.18); }
-    .hero h1 { color: #fff; font-size: 1.85rem; font-weight: 800; margin: 0; padding: 0; letter-spacing: -.02em; }
-    .hero p { color: #dbe7f5; margin: .35rem 0 0 0; font-size: .98rem; }
-    .hero .tag { display: inline-block; background: rgba(255,255,255,.16); border: 1px solid rgba(255,255,255,.25);
-                 padding: .15rem .6rem; border-radius: 999px; font-size: .75rem; margin-right: .4rem;
-                 margin-top: .6rem; color: #fff; }
+    /* rail */
+    [data-testid="stSidebar"] {{ background: {BRAND}; }}
+    [data-testid="stSidebar"] > div:first-child {{ padding-top: .5rem; }}
+    [data-testid="stSidebar"] * {{ color: #fff; }}
+    .rail-brand {{ font-size: 20px; font-weight: 800; letter-spacing: .01em; padding: 2px 4px 2px; }}
+    .rail-sub {{ font-size: 12.5px; color: #c8d5ee !important; padding: 0 4px 14px; }}
+    [data-testid="stSidebar"] [role="radiogroup"] {{ gap: 2px; display: flex; flex-direction: column; align-items: stretch; width: 100%; }}
+    [data-testid="stSidebar"] [data-testid="stElementContainer"]:has([data-testid="stRadio"]),
+    [data-testid="stSidebar"] [data-testid="stRadio"], [data-testid="stSidebar"] [data-testid="stRadioGroup"],
+    [data-testid="stSidebar"] [data-testid="stRadioGroup"] > div {{ width: 100% !important; }}
+    [data-testid="stSidebar"] [data-testid="stRadioOption"] {{
+        display: flex; align-items: center; min-height: 44px; padding: 0 12px; margin: 0; border-radius: 10px;
+        width: auto; align-self: stretch; max-width: none; transition: background-color .15s ease-out, color .15s ease-out; }}
+    [data-testid="stSidebar"] [data-testid="stRadioOption"] > div > div:not([data-testid="stMarkdownContainer"]) {{ display: none; }}
+    [data-testid="stSidebar"] [data-testid="stRadioOption"] > div {{ padding: 0; }}
+    [data-testid="stSidebar"] [data-testid="stRadioOption"] p {{ color: #dbe5f7; font-weight: 650; font-size: 15px; margin: 0; }}
+    [data-testid="stSidebar"] [data-testid="stRadioOption"]:hover {{ background: rgba(255,255,255,.1); }}
+    [data-testid="stSidebar"] [data-testid="stRadioOption"][data-selected="true"] {{ background: #fff; }}
+    [data-testid="stSidebar"] [data-testid="stRadioOption"][data-selected="true"] p {{ color: {BRAND}; }}
+    .rail-source {{ margin-top: 22px; border: 2px solid rgba(255,255,255,.4); border-radius: 10px; padding: 10px 12px;
+                    display: grid; gap: 8px; }}
+    .rail-source div {{ display: grid; gap: 1px; }}
+    .rail-source b {{ font-size: 13.5px; }}
+    .rail-source span {{ font-size: 12.5px; color: #c8d5ee !important; }}
+    .rail-foot {{ margin-top: 18px; font-size: 12px; color: #c8d5ee !important; line-height: 1.5; padding: 0 4px; }}
 
-    /* KPI cards */
-    .kpi { background: #fff; border: 1px solid #e5e9f0; border-radius: 14px; padding: 1rem 1.15rem;
-           box-shadow: 0 2px 8px rgba(15,23,42,.05); height: 100%; border-top: 4px solid var(--accent); }
-    .kpi .label { color: #64748b; font-size: .78rem; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
-    .kpi .value { color: #0f172a; font-size: 1.75rem; font-weight: 800; margin-top: .2rem; letter-spacing: -.02em; }
-    .kpi .sub { color: #64748b; font-size: .8rem; margin-top: .15rem; }
-    .kpi .up { color: #15803d; font-weight: 700; } .kpi .down { color: #b91c1c; font-weight: 700; }
+    /* page head */
+    .desk-head {{ display: flex; align-items: center; gap: 12px; margin: 0 0 4px; }}
+    .desk-head h1 {{ margin: 0; padding: 0; font-size: 26px; font-weight: 800; letter-spacing: -.01em; color: {INK}; }}
+    .source-pill {{ margin-left: auto; font-size: 13px; font-weight: 750; padding: 4px 10px; border-radius: 99px;
+                    border: 2px solid {BRAND}; color: {BRAND}; background: #e7edf8; white-space: nowrap; }}
+    .desk-lede {{ margin: 0 0 14px; font-size: 14.5px; color: {INK2}; }}
 
-    /* insight callout */
-    .insight { background: #fff7ed; border-left: 5px solid #e67e22; border-radius: 10px;
-               padding: .85rem 1.1rem; color: #7c2d12; font-size: .93rem; margin: .4rem 0 1rem 0; }
-    .insight b { color: #9a3412; }
+    /* report row: headline figures as one ruled band */
+    .report {{ display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 2px;
+               border: 2px solid {LINE_STRONG}; border-radius: 12px; overflow: hidden; background: {LINE}; }}
+    .report > div {{ padding: 10px 14px 12px; display: flex; flex-direction: column; gap: 4px; background: #fff; }}
+    .report > div.reg {{ background: #f4f6f9; }}
+    .report span {{ font-size: 12.5px; font-weight: 800; color: {INK2}; line-height: 1.2; }}
+    .report b {{ font-size: 28px; line-height: 1.05; font-weight: 800; letter-spacing: -.01em; color: {INK};
+                 font-variant-numeric: tabular-nums; }}
+    .report em {{ font-style: normal; font-size: 12.5px; color: {INK2}; font-weight: 600; }}
+    .report-note {{ margin: 10px 2px 20px !important; font-size: 13.5px; color: {INK2}; }}
 
-    /* segment cards */
-    .seg { background: #fff; border: 1px solid #e5e9f0; border-radius: 14px; padding: .95rem 1.05rem;
-           border-left: 6px solid var(--accent); height: 100%; box-shadow: 0 2px 8px rgba(15,23,42,.05); }
-    .seg h4 { margin: 0 0 .3rem 0; font-size: 1rem; color: #0f172a; }
-    .seg .items { color: #334155; font-size: .86rem; margin-bottom: .45rem; }
-    .seg .rule { color: #475569; font-size: .82rem; background: #f1f5f9; border-radius: 8px; padding: .4rem .55rem; }
+    /* panels */
+    [data-testid="stVerticalBlockBorderWrapper"]:has(> div > [data-testid="stVerticalBlock"]) {{
+        border: 2px solid {LINE} !important; border-radius: 12px !important; background: #fff; }}
+    .panel-h {{ font-size: 16px; font-weight: 800; color: {INK}; margin: 0 0 2px; }}
+    .panel-sub {{ font-size: 12.5px; color: {INK2}; font-weight: 600; margin: 0 0 6px; }}
+    .legend {{ display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12.5px; font-weight: 700; color: {INK2}; margin: 2px 0 4px; }}
+    .legend span {{ display: inline-flex; align-items: center; gap: 6px; }}
+    .legend i {{ width: 10px; height: 10px; border-radius: 2px; display: inline-block; }}
 
-    .section-title { font-size: 1.08rem; font-weight: 700; color: #0f172a; margin: .4rem 0 .2rem 0; }
+    /* clusters: one ruled band, a column per cluster */
+    .segs {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 2px; border: 2px solid {LINE_STRONG};
+             border-radius: 12px; overflow: hidden; background: {LINE}; margin-bottom: 18px; }}
+    .segs > div {{ background: #fff; padding: 12px 14px; display: grid; gap: 6px; align-content: start; }}
+    .segs h3 {{ margin: 0; padding: 0; font-size: 14.5px; font-weight: 800; color: {INK}; display: flex; gap: 8px; align-items: center; }}
+    .segs h3 i {{ width: 10px; height: 10px; border-radius: 2px; flex: none; }}
+    .segs p {{ margin: 0; font-size: 13.5px; color: {INK}; }}
+    .segs small {{ font-size: 12.5px; color: {INK2}; font-weight: 600; border-top: 1px solid #d5dbe3; padding-top: 6px; }}
 
-    /* sidebar */
-    [data-testid="stSidebar"] { background: #0f2340; }
-    [data-testid="stSidebar"] * { color: #e2e8f0 !important; }
-    [data-testid="stSidebar"] .brand { font-size: 1.25rem; font-weight: 800; color: #fff !important; margin-bottom: .1rem; }
-    [data-testid="stSidebar"] .muted { color: #94a3b8 !important; font-size: .8rem; }
-    [data-testid="stSidebar"] [role="radiogroup"] label { padding: .45rem .6rem; border-radius: 10px; margin-bottom: .2rem; }
-    [data-testid="stSidebar"] [role="radiogroup"] label:hover { background: rgba(255,255,255,.08); }
-    [data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) { background: rgba(230,126,34,.22); }
-    [data-testid="stSidebar"] hr { border-color: rgba(255,255,255,.15); }
-    .model-box { background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12);
-                 border-radius: 10px; padding: .7rem .8rem; font-size: .8rem; line-height: 1.5; }
-
-    [data-testid="stVerticalBlockBorderWrapper"] { background: #fff; border-radius: 14px; }
-    #MainMenu, footer { visibility: hidden; }
+    /* widgets */
+    [data-testid="stWidgetLabel"] p {{ font-size: 13px; font-weight: 800; color: {INK2}; }}
+    [data-baseweb="select"] > div {{ border: 2px solid {LINE_STRONG} !important; border-radius: 10px !important; }}
+    [data-baseweb="tag"] {{ background: {BRAND} !important; border-radius: 6px !important; }}
+    [data-testid="stDataFrame"] {{ border: 1px solid #d5dbe3; border-radius: 8px; }}
+    [data-testid="stCaptionContainer"] p {{ color: {INK2}; font-size: 13px; }}
+    #MainMenu, footer {{ visibility: hidden; }}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 
-def hero(title: str, subtitle: str, tags=()):
-    chips = "".join(f'<span class="tag">{t}</span>' for t in tags)
-    st.markdown(f'<div class="hero"><h1>{title}</h1><p>{subtitle}</p>{chips}</div>', unsafe_allow_html=True)
+def head(title: str, lede: str, pill: str = "Superstore · Jan 2015 – Dec 2018"):
+    st.markdown(f'<div class="desk-head"><h1>{title}</h1><span class="source-pill">{pill}</span></div>'
+                f'<p class="desk-lede">{lede}</p>', unsafe_allow_html=True)
 
 
-def kpi(col, label: str, value: str, sub: str = "", accent: str = NAVY):
-    col.markdown(f'<div class="kpi" style="--accent:{accent}"><div class="label">{label}</div>'
-                 f'<div class="value">{value}</div><div class="sub">{sub}</div></div>', unsafe_allow_html=True)
+def report(cells, note: str = ""):
+    """cells: (label, value, sub, regular?) -> one ruled band like a printed report row."""
+    html = "".join(f'<div class="{"reg" if reg else ""}"><span>{lab}</span><b>{val}</b><em>{sub}</em></div>'
+                   for lab, val, sub, reg in cells)
+    st.markdown(f'<section class="report">{html}</section>'
+                + (f'<p class="report-note">{note}</p>' if note else '<div style="height:16px"></div>'),
+                unsafe_allow_html=True)
 
 
-def insight(text: str):
-    st.markdown(f'<div class="insight">💡 {text}</div>', unsafe_allow_html=True)
+def panel_head(title: str, sub: str = "", legend: dict | None = None):
+    leg = ""
+    if legend:
+        leg = '<div class="legend">' + "".join(f'<span><i style="background:{c}"></i>{k}</span>'
+                                               for k, c in legend.items()) + "</div>"
+    st.markdown(f'<div class="panel-h">{title}</div>' + (f'<div class="panel-sub">{sub}</div>' if sub else "") + leg,
+                unsafe_allow_html=True)
 
 
-def style(fig, height=380, legend=True):
+def style(fig, height=340):
     fig.update_layout(
-        template="plotly_white", height=height, font=dict(family="Inter, sans-serif", size=12, color="#334155"),
-        title=dict(font=dict(size=15, color="#0f172a"), x=0, xanchor="left", y=0.98, yref="container", yanchor="top"),
-        margin=dict(l=10, r=10, t=88 if legend else 55, b=10), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        hoverlabel=dict(bgcolor="white", font_size=12), showlegend=legend,
-        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0, title_text=""),
+        template="simple_white", height=height, showlegend=False, title=None,
+        font=dict(family=FONT, size=12.5, color=INK2),
+        margin=dict(l=4, r=8, t=8, b=4), paper_bgcolor="#fff", plot_bgcolor="#fff",
+        hoverlabel=dict(bgcolor="#fff", bordercolor=LINE_STRONG, font=dict(family=FONT, size=12.5, color=INK)),
+        bargap=0.28,
     )
-    fig.update_xaxes(showgrid=False, linecolor="#cbd5e1")
-    fig.update_yaxes(gridcolor="#eef2f7", zeroline=False)
+    fig.update_xaxes(showgrid=False, linecolor=LINE_STRONG, linewidth=1.5, ticks="", title_font=dict(size=12.5))
+    fig.update_yaxes(showgrid=True, gridcolor="#e3e8ef", showline=False, ticks="", zeroline=False,
+                     title_font=dict(size=12.5))
     return fig
 
 
@@ -235,8 +272,8 @@ def clusters() -> tuple:
 # ----------------------------------------------------------------- load or ask for data
 DATA_PATH = find_data()
 if DATA_PATH is None:
-    hero("Demand Intelligence System", "Upload the Superstore sales file to start.")
-    st.warning("train.csv was not found next to app.py. Upload the Superstore sales file (train.csv) to continue.")
+    head("Demand Intelligence", "train.csv was not found next to app.py. Upload the Superstore sales file to continue.",
+         "No data")
     up = st.file_uploader("Upload train.csv", type="csv")
     if up is not None:
         UPLOAD_PATH.write_bytes(up.getvalue())
@@ -249,228 +286,213 @@ if missing:
     st.error(f"This CSV is missing required columns: {', '.join(sorted(missing))}. Use the Superstore train.csv.")
     st.stop()
 
-# ----------------------------------------------------------------- sidebar
-with st.sidebar:
-    st.markdown('<div class="brand">📈 Demand Intelligence</div>', unsafe_allow_html=True)
-    st.markdown('<div class="muted">Superstore retail sales · Jan 2015 – Dec 2018</div>', unsafe_allow_html=True)
-    st.markdown("---")
-    page = st.radio("Navigate", ["📊  Sales Overview", "🔮  Forecast Explorer", "🚨  Anomaly Report",
-                                 "🧩  Product Demand Segments"], label_visibility="collapsed")
-    page = page.split("  ", 1)[1]
-    st.markdown("---")
-    st.markdown(
-        '<div class="model-box"><b>Forecast model</b><br>SARIMA(1,1,1)(1,1,1,12)<br><br>'
-        '<b>Backtest window</b><br>Oct – Dec 2018 (peak quarter)<br><br>'
-        '<b>Anomalies</b><br>Isolation Forest + rolling z-score<br><br>'
-        '<b>Segments</b><br>K-Means (k = 4) with PCA</div>', unsafe_allow_html=True)
-    st.markdown('<br><div class="muted">Built by Muhammed Al Hameed M<br>AI & Data Science Intern · XYlofy AI</div>',
-                unsafe_allow_html=True)
+fmt_money = st.column_config.NumberColumn(format="$%,.0f")
 
-# ----------------------------------------------------------------- page 1: overview
-if page == "Sales Overview":
-    hero("Sales Overview", "Four years of retail orders at a glance. Filter by region and category.",
-         ["9,800 order lines", "4 regions", "3 categories", "17 sub-categories"])
-    with st.container(border=True):
-        c1, c2 = st.columns(2)
-        regions = c1.multiselect("Region", sorted(df["Region"].unique()), default=sorted(df["Region"].unique()))
-        cats = c2.multiselect("Category", sorted(df["Category"].unique()), default=sorted(df["Category"].unique()))
+# ----------------------------------------------------------------- rail
+with st.sidebar:
+    st.markdown('<div class="rail-brand">Demand Intelligence</div>'
+                '<div class="rail-sub">Sales forecasting for a US retailer</div>', unsafe_allow_html=True)
+    page = st.radio("Page", ["Sales overview", "Forecast", "Anomalies", "Demand segments"],
+                    label_visibility="collapsed")
+    st.markdown(
+        '<div class="rail-source">'
+        '<div><b>Data</b><span>Superstore train.csv · 9,800 order lines</span></div>'
+        '<div><b>Forecast model</b><span>SARIMA (1,1,1)(1,1,1,12)</span></div>'
+        '<div><b>Backtest</b><span>Trained to Sep 2018, scored Oct – Dec 2018</span></div>'
+        '</div>'
+        '<div class="rail-foot">Muhammed Al Hameed M<br>AI &amp; Data Science Intern, XYlofy AI</div>',
+        unsafe_allow_html=True)
+
+# ----------------------------------------------------------------- sales overview
+if page == "Sales overview":
+    head("Sales overview", "Four years of orders by region and category. The filters scope every figure on this page.")
+    c1, c2 = st.columns(2)
+    regions = c1.multiselect("Region", sorted(df["Region"].unique()), default=sorted(df["Region"].unique()))
+    cats = c2.multiselect("Category", sorted(df["Category"].unique()), default=sorted(df["Category"].unique()))
     f = df[df["Region"].isin(regions) & df["Category"].isin(cats)]
     if f.empty:
-        st.info("No data for this selection. Pick at least one region and one category.")
+        st.info("Nothing matches this filter. Pick at least one region and one category.")
         st.stop()
 
     yr = f.groupby("Year")["Sales"].sum()
     growth = (yr.get(2018, 0) / yr.get(2017, 1) - 1) * 100
-    k1, k2, k3, k4 = st.columns(4)
-    kpi(k1, "Total sales", f"${f['Sales'].sum():,.0f}", "Jan 2015 – Dec 2018", NAVY)
-    kpi(k2, "Orders", f"{f['Order ID'].nunique():,}", f"Avg order ${f.groupby('Order ID')['Sales'].sum().mean():,.0f}", BLUE)
-    kpi(k3, "Customers", f"{f['Customer ID'].nunique():,}", "Unique buyers", GREEN)
-    cls = "up" if growth >= 0 else "down"
-    kpi(k4, "2018 vs 2017", f"{growth:+.1f}%", f'<span class="{cls}">{"▲" if growth >= 0 else "▼"}</span> year-on-year sales',
-        ORANGE)
-    st.write("")
+    m = monthly(f)
+    peak = m.groupby(m.index.month).mean()
+    hi, lo = pd.Timestamp(2000, int(peak.idxmax()), 1), pd.Timestamp(2000, int(peak.idxmin()), 1)
+    report([
+        ("Total sales", f"${f['Sales'].sum():,.0f}", "Jan 2015 – Dec 2018", False),
+        ("Orders", f"{f['Order ID'].nunique():,}", f"${f.groupby('Order ID')['Sales'].sum().mean():,.0f} per order", False),
+        ("Customers", f"{f['Customer ID'].nunique():,}", "Distinct customer IDs", False),
+        ("2018 vs 2017", f"{growth:+.1f}%", "Change in yearly sales", True),
+    ], note=f"{hi:%B} is the busiest month on average and {lo:%B} the quietest, "
+            f"{peak.max() / peak.min():.1f}× apart. Stock should start building in September.")
 
-    a, b = st.columns([1, 2])
+    a, b = st.columns([1, 2], gap="medium")
     with a.container(border=True):
-        fig = px.bar(x=yr.index.astype(str), y=yr.values, labels={"x": "Year", "y": "Sales ($)"},
-                     title="Total sales by year", color_discrete_sequence=[NAVY], text=yr.values)
-        fig.update_traces(texttemplate="$%{text:,.0f}", textposition="outside", cliponaxis=False,
-                          hovertemplate="%{x}: $%{y:,.0f}<extra></extra>", marker_line_width=0)
-        fig.update_yaxes(range=[0, yr.max() * 1.15])
-        st.plotly_chart(style(fig, legend=False), width="stretch")
-    with b.container(border=True):
-        m = monthly(f)
-        fig = go.Figure(go.Scatter(x=m.index, y=m.values, mode="lines+markers", line=dict(color=NAVY, width=2.5),
-                                   marker=dict(size=5), fill="tozeroy", fillcolor="rgba(47,111,176,.08)",
-                                   hovertemplate="%{x|%b %Y}: $%{y:,.0f}<extra></extra>"))
-        fig.update_layout(title="Monthly sales trend", yaxis_title="Sales ($)")
-        st.plotly_chart(style(fig, legend=False), width="stretch")
-
-    a, b = st.columns(2)
-    with a.container(border=True):
-        rc = f.groupby(["Region", "Category"])["Sales"].sum().reset_index()
-        fig = px.bar(rc, x="Region", y="Sales", color="Category", barmode="group", title="Sales by region and category",
-                     color_discrete_map=CAT_COLORS)
-        fig.update_traces(hovertemplate="%{x}: $%{y:,.0f}<extra></extra>", marker_line_width=0)
+        panel_head("Sales by year", "US dollars")
+        fig = go.Figure(go.Bar(x=yr.index.astype(str), y=yr.values, marker_color=BRAND, text=yr.values,
+                               texttemplate="$%{text:,.0f}", textposition="outside", cliponaxis=False,
+                               hovertemplate="%{x}: $%{y:,.0f}<extra></extra>"))
+        fig.update_yaxes(range=[0, yr.max() * 1.16], tickprefix="$")
         st.plotly_chart(style(fig), width="stretch")
     with b.container(border=True):
+        panel_head("Sales by month", "Each point is one calendar month")
+        fig = go.Figure(go.Scatter(x=m.index, y=m.values, mode="lines+markers", line=dict(color=BRAND, width=2),
+                                   marker=dict(size=4), hovertemplate="%{x|%b %Y}: $%{y:,.0f}<extra></extra>"))
+        fig.update_yaxes(tickprefix="$")
+        st.plotly_chart(style(fig), width="stretch")
+
+    a, b = st.columns(2, gap="medium")
+    with a.container(border=True):
+        panel_head("Sales by region and category", legend={k: v for k, v in CAT_COLORS.items() if k in cats})
+        rc = f.groupby(["Region", "Category"])["Sales"].sum().reset_index()
+        fig = px.bar(rc, x="Region", y="Sales", color="Category", barmode="group", color_discrete_map=CAT_COLORS)
+        fig.update_traces(hovertemplate="%{x}: $%{y:,.0f}<extra></extra>", marker_line_width=0)
+        fig.update_layout(xaxis_title=None, yaxis_title=None)
+        fig.update_yaxes(tickprefix="$")
+        st.plotly_chart(style(fig), width="stretch")
+    with b.container(border=True):
+        panel_head("Top 10 sub-categories", "Total sales over four years")
         sc = f.groupby("Sub-Category")["Sales"].sum().sort_values().tail(10)
-        fig = px.bar(x=sc.values, y=sc.index, orientation="h", title="Top 10 sub-categories",
-                     labels={"x": "Sales ($)", "y": ""}, color_discrete_sequence=[ORANGE], text=sc.values)
-        fig.update_traces(texttemplate="$%{text:,.0f}", textposition="outside", cliponaxis=False,
-                          hovertemplate="%{y}: $%{x:,.0f}<extra></extra>", marker_line_width=0)
-        fig.update_xaxes(range=[0, sc.max() * 1.22])
-        st.plotly_chart(style(fig, legend=False), width="stretch")
+        fig = go.Figure(go.Bar(x=sc.values, y=sc.index, orientation="h", marker_color=BLUE, text=sc.values,
+                               texttemplate="$%{text:,.0f}", textposition="outside", cliponaxis=False,
+                               hovertemplate="%{y}: $%{x:,.0f}<extra></extra>"))
+        fig.update_xaxes(range=[0, sc.max() * 1.22], showticklabels=False, showline=False)
+        fig.update_yaxes(showgrid=False)
+        st.plotly_chart(style(fig), width="stretch")
 
-    peak = m.groupby(m.index.month).mean()
-    insight(f"<b>Seasonality:</b> the busiest month on average is <b>{pd.Timestamp(2000, int(peak.idxmax()), 1):%B}</b> and the "
-            f"quietest is <b>{pd.Timestamp(2000, int(peak.idxmin()), 1):%B}</b>, about "
-            f"<b>{peak.max() / peak.min():.1f}×</b> apart. Stock and staffing should build from September.")
-
-# ----------------------------------------------------------------- page 2: forecast
-elif page == "Forecast Explorer":
-    hero("Forecast Explorer", "SARIMA forecasts with a 95% confidence range, for the whole business, a category or a region.",
-         ["Trained on 45 months", "Backtested on Oct – Dec 2018", "Refitted on all 48 months"])
-    with st.container(border=True):
-        c1, c2 = st.columns([2, 1])
-        options = ["All sales", "Furniture", "Office Supplies", "Technology", "Central", "East", "South", "West"]
-        seg = c1.selectbox("Category or region", options, index=0)
-        h = c2.select_slider("Forecast horizon (months ahead)", options=[1, 2, 3], value=3)
+# ----------------------------------------------------------------- forecast
+elif page == "Forecast":
+    head("Forecast", "SARIMA forecast with a 95% range, for the whole business, one category or one region.")
+    c1, c2 = st.columns([2, 1])
+    options = ["All sales", "Furniture", "Office Supplies", "Technology", "Central", "East", "South", "West"]
+    seg = c1.selectbox("Category or region", options, index=0)
+    h = c2.select_slider("Months ahead", options=[1, 2, 3], value=3)
     s, fc, ci, mae, rmse, mape, test, bt = sarima_results(seg)
     fc, ci = fc.iloc[:h], ci.iloc[:h]
 
-    k1, k2, k3, k4 = st.columns(4)
-    kpi(k1, "Forecast total", f"${fc.sum():,.0f}", f"Next {h} month(s)", ORANGE)
-    kpi(k2, "MAE (backtest)", f"${mae:,.0f}", "Average monthly error", NAVY)
-    kpi(k3, "RMSE (backtest)", f"${rmse:,.0f}", "Penalises large misses", BLUE)
-    kpi(k4, "MAPE (backtest)", f"{mape:.1f}%", "Average % error", GREEN)
-    st.write("")
+    report([
+        ("Forecast total", f"${fc.sum():,.0f}", f"{fc.index[0]:%b} – {fc.index[-1]:%b %Y}", False),
+        ("MAE", f"${mae:,.0f}", "Average miss per month", True),
+        ("RMSE", f"${rmse:,.0f}", "Weights large misses more", True),
+        ("MAPE", f"{mape:.1f}%", "Average miss as a share", True),
+    ], note="Error figures come from the backtest: the model was trained to September 2018 and scored on "
+            "October to December 2018, the peak quarter. The forecast itself uses all 48 months.")
 
     with st.container(border=True):
-        fig = go.Figure()
+        panel_head(f"{seg}: last 24 months and the next {h}",
+                   legend={"Actual": BRAND, "Forecast": AMBER, "95% range": "#f3dca8"})
         hist = s.iloc[-24:]
-        fig.add_trace(go.Scatter(x=hist.index, y=hist.values, name="Actual", mode="lines+markers",
-                                 line=dict(color=NAVY, width=2.5), hovertemplate="%{x|%b %Y}: $%{y:,.0f}<extra>Actual</extra>"))
         bx = [hist.index[-1]] + list(ci.index)
+        fig = go.Figure()
         fig.add_trace(go.Scatter(x=bx + bx[::-1],
                                  y=[hist.values[-1]] + list(ci["upper"]) + list(ci["lower"][::-1]) + [hist.values[-1]],
-                                 fill="toself", fillcolor="rgba(230,126,34,0.18)", line=dict(width=0), mode="lines",
-                                 name="95% interval", hoverinfo="skip"))
-        bridge_x = [hist.index[-1]] + list(fc.index)
-        bridge_y = [hist.values[-1]] + list(fc.values)
-        fig.add_trace(go.Scatter(x=bridge_x, y=bridge_y, name="SARIMA forecast", mode="lines+markers",
-                                 line=dict(color=ORANGE, dash="dash", width=2.5), marker=dict(size=8),
+                                 fill="toself", fillcolor="rgba(201,133,0,0.18)", line=dict(width=0), mode="lines",
+                                 hoverinfo="skip"))
+        fig.add_trace(go.Scatter(x=hist.index, y=hist.values, mode="lines+markers", line=dict(color=BRAND, width=2),
+                                 marker=dict(size=5), hovertemplate="%{x|%b %Y}: $%{y:,.0f}<extra>Actual</extra>"))
+        fig.add_trace(go.Scatter(x=[hist.index[-1]] + list(fc.index), y=[hist.values[-1]] + list(fc.values),
+                                 mode="lines+markers", line=dict(color=AMBER, width=2, dash="dash"), marker=dict(size=7),
                                  hovertemplate="%{x|%b %Y}: $%{y:,.0f}<extra>Forecast</extra>"))
-        fig.add_vline(x=hist.index[-1], line_width=1, line_dash="dot", line_color=GREY)
-        fig.update_layout(title=f"{seg}: last 24 months and next {h} month(s)", yaxis_title="Sales ($)")
-        st.plotly_chart(style(fig, height=440), width="stretch")
+        fig.update_yaxes(tickprefix="$")
+        st.plotly_chart(style(fig, height=400), width="stretch")
 
-    a, b = st.columns([3, 2])
+    a, b = st.columns([3, 2], gap="medium")
     with a.container(border=True):
-        st.markdown('<div class="section-title">Forecast table</div>', unsafe_allow_html=True)
-        out = pd.DataFrame({"Month": fc.index.strftime("%b %Y"), "Forecast ($)": fc.values.round(0),
-                            "Lower 95% ($)": ci["lower"].values.round(0), "Upper 95% ($)": ci["upper"].values.round(0)})
+        panel_head("Forecast by month", "With the 95% range")
+        out = pd.DataFrame({"Month": fc.index.strftime("%b %Y"), "Forecast": fc.values.round(0),
+                            "Low": ci["lower"].values.round(0), "High": ci["upper"].values.round(0)})
         st.dataframe(out, hide_index=True, width="stretch",
-                     column_config={c: st.column_config.NumberColumn(format="$%,.0f")
-                                    for c in ["Forecast ($)", "Lower 95% ($)", "Upper 95% ($)"]})
+                     column_config={c: fmt_money for c in ["Forecast", "Low", "High"]})
     with b.container(border=True):
-        st.markdown('<div class="section-title">Backtest: actual vs predicted</div>', unsafe_allow_html=True)
-        bt_df = pd.DataFrame({"Month": test.index.strftime("%b %Y"), "Actual ($)": test.values.round(0),
-                              "Predicted ($)": bt.values.round(0)})
+        panel_head("Backtest", "Actual against predicted, Oct – Dec 2018")
+        bt_df = pd.DataFrame({"Month": test.index.strftime("%b %Y"), "Actual": test.values.round(0),
+                              "Predicted": bt.values.round(0)})
         st.dataframe(bt_df, hide_index=True, width="stretch",
-                     column_config={c: st.column_config.NumberColumn(format="$%,.0f") for c in ["Actual ($)", "Predicted ($)"]})
-    st.caption("Backtest: model trained to Sep 2018 and scored on Oct–Dec 2018. Forecast: model refitted on all 48 months.")
+                     column_config={c: fmt_money for c in ["Actual", "Predicted"]})
 
-# ----------------------------------------------------------------- page 3: anomalies
-elif page == "Anomaly Report":
-    hero("Anomaly Report", "Weeks where sales broke from the normal pattern, found by two independent methods.",
-         ["Isolation Forest (5% contamination)", "8-week rolling z-score, |z| > 2"])
+# ----------------------------------------------------------------- anomalies
+elif page == "Anomalies":
+    head("Anomalies", "Weeks where sales broke from their normal pattern, found by two separate methods.")
     wd = weekly_anomalies()
     both = int((wd["iso"] & wd["zflag"]).sum())
-    k1, k2, k3, k4 = st.columns(4)
-    kpi(k1, "Weeks analysed", f"{len(wd)}", "Weekly sales totals", NAVY)
-    kpi(k2, "Isolation Forest flags", f"{int(wd['iso'].sum())}", "Unusual vs whole history", RED)
-    kpi(k3, "Z-score flags", f"{int(wd['zflag'].sum())}", "Unusual vs nearby weeks", ORANGE)
-    kpi(k4, "Flagged by both", f"{both}", "Highest-confidence anomalies", GREEN)
-    st.write("")
+    report([
+        ("Weeks checked", f"{len(wd)}", "Weekly sales totals", False),
+        ("Isolation Forest", f"{int(wd['iso'].sum())}", "Unusual against all four years", False),
+        ("Rolling z-score", f"{int(wd['zflag'].sum())}", "Unusual against the 8 weeks around it", False),
+        ("Flagged by both", f"{both}", "Check these first", True),
+    ], note="Isolation Forest is set to expect 5% unusual weeks. The z-score flags a week more than two standard "
+            "deviations from its 8-week rolling mean.")
 
     with st.container(border=True):
+        panel_head("Weekly sales", legend={"Weekly sales": LINE_STRONG, "8-week mean": BLUE,
+                                           "Isolation Forest": RED, "Z-score": AMBER})
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=wd["week"], y=wd["sales"], name="Weekly sales", line=dict(color="#475569", width=1.2),
+        fig.add_trace(go.Scatter(x=wd["week"], y=wd["sales"], line=dict(color=LINE_STRONG, width=1.2),
                                  hovertemplate="Week of %{x|%d %b %Y}: $%{y:,.0f}<extra></extra>"))
-        fig.add_trace(go.Scatter(x=wd["week"], y=wd["rolling_mean"], name="8-week rolling mean",
-                                 line=dict(color=BLUE, dash="dash"), hoverinfo="skip"))
+        fig.add_trace(go.Scatter(x=wd["week"], y=wd["rolling_mean"], line=dict(color=BLUE, width=1.5, dash="dot"),
+                                 hoverinfo="skip"))
         a_ = wd[wd["iso"]]
-        fig.add_trace(go.Scatter(x=a_["week"], y=a_["sales"], mode="markers", name="Isolation Forest",
-                                 marker=dict(color=RED, symbol="x", size=12, line=dict(width=2)),
+        fig.add_trace(go.Scatter(x=a_["week"], y=a_["sales"], mode="markers",
+                                 marker=dict(color=RED, symbol="x-thin", size=12, line=dict(width=2.5, color=RED)),
                                  hovertemplate="%{x|%d %b %Y}: $%{y:,.0f}<extra>Isolation Forest</extra>"))
         z = wd[wd["zflag"]]
-        fig.add_trace(go.Scatter(x=z["week"], y=z["sales"], mode="markers", name="Z-score (|z| > 2)",
-                                 marker=dict(color=ORANGE, size=11, line=dict(color="white", width=1.5)),
+        fig.add_trace(go.Scatter(x=z["week"], y=z["sales"], mode="markers",
+                                 marker=dict(color="#fff", size=10, line=dict(color=AMBER, width=2.5)),
                                  hovertemplate="%{x|%d %b %Y}: $%{y:,.0f}<extra>Z-score</extra>"))
-        fig.update_layout(yaxis_title="Sales ($)", title="Weekly sales with detected anomalies")
-        st.plotly_chart(style(fig, height=450), width="stretch")
+        fig.update_yaxes(tickprefix="$")
+        st.plotly_chart(style(fig, height=400), width="stretch")
 
     flagged = wd[wd["iso"] | wd["zflag"]].copy()
-    flagged["Flagged by"] = np.where(flagged["iso"] & flagged["zflag"], "🔴 Both",
+    flagged["Flagged by"] = np.where(flagged["iso"] & flagged["zflag"], "Both",
                                      np.where(flagged["iso"], "Isolation Forest", "Z-score"))
-    flagged["Week starting"] = flagged["week"].dt.strftime("%d %b %Y")
-    flagged["Sales ($)"] = flagged["sales"].round(0)
+    flagged["Week of"] = flagged["week"].dt.strftime("%d %b %Y")
+    flagged["Sales"] = flagged["sales"].round(0)
     pct = (flagged["sales"] / flagged["rolling_mean"] - 1) * 100
-    flagged["vs rolling mean"] = pct.map(lambda v: "–" if pd.isna(v) else f"{v:+.0f}%")
+    flagged["Against 8-week mean"] = pct.map(lambda v: "No mean yet" if pd.isna(v) else f"{v:+.0f}%")
     with st.container(border=True):
-        st.markdown('<div class="section-title">Flagged weeks</div>', unsafe_allow_html=True)
-        st.dataframe(flagged[["Week starting", "Sales ($)", "vs rolling mean", "Flagged by"]], hide_index=True,
-                     width="stretch", height=(len(flagged) + 1) * 35 + 3,
-                     column_config={"Sales ($)": st.column_config.NumberColumn(format="$%,.0f")})
-    insight("<b>How to use this:</b> spikes flagged by both methods are worth checking against promotions, bulk orders or "
-            "data-entry errors before they are fed into the next forecast.")
+        panel_head("Flagged weeks", f"{len(flagged)} weeks, oldest first")
+        st.dataframe(flagged[["Week of", "Sales", "Against 8-week mean", "Flagged by"]], hide_index=True,
+                     width="stretch", height=(len(flagged) + 1) * 35 + 3, column_config={"Sales": fmt_money})
 
-# ----------------------------------------------------------------- page 4: segments
+# ----------------------------------------------------------------- demand segments
 else:
-    hero("Product Demand Segments", "17 sub-categories grouped by how they sell, each with its own stocking rule.",
-         ["K-Means, k = 4", "5 standardised features", "PCA for the 2-D view"])
+    head("Demand segments", "The 17 sub-categories grouped by how they sell, each with its own stocking rule.")
     sub, ev = clusters()
-    colors = {"Growing, frequently bought": GREEN, "High volume, high volatility": RED,
-              "Low volume, mature": GREY, "Low volume, high value": NAVY}
-
-    cols = st.columns(4)
-    for col, name in zip(cols, ["High volume, high volatility", "Growing, frequently bought",
-                                "Low volume, high value", "Low volume, mature"]):
-        g = sub[sub["segment"] == name]
+    order = ["High volume, high volatility", "Growing, frequently bought", "Low volume, high value", "Low volume, mature"]
+    cells = ""
+    for name in order:
+        g = sub[sub["segment"] == name].sort_values("total_sales", ascending=False)
         if g.empty:
             continue
-        col.markdown(f'<div class="seg" style="--accent:{colors[name]}"><h4>{name}</h4>'
-                     f'<div class="items">{", ".join(g.sort_values("total_sales", ascending=False)["Sub-Category"])}</div>'
-                     f'<div class="rule">📦 {g["strategy"].iloc[0]}</div></div>', unsafe_allow_html=True)
-    st.write("")
+        cells += (f'<div><h3><i style="background:{SEG_COLORS[name]}"></i>{name}</h3>'
+                  f'<p>{", ".join(g["Sub-Category"])}</p><small>{g["strategy"].iloc[0]}</small></div>')
+    st.markdown(f'<section class="segs">{cells}</section>', unsafe_allow_html=True)
 
     with st.container(border=True):
+        panel_head("Clusters on the first two principal components",
+                   f"K-Means with k = 4 on five standardised features. PC1 explains {ev[0]:.1%} of the variance, "
+                   f"PC2 {ev[1]:.1%}. Bubble size is total sales.", legend={k: SEG_COLORS[k] for k in order})
         sub["label"] = np.where(sub["total_sales"] >= 30000, sub["Sub-Category"], "")
-        fig = px.scatter(sub, x="PC1", y="PC2", color="segment", text="label", color_discrete_map=colors,
-                         size="total_sales", size_max=38,
-                         custom_data=["Sub-Category", "total_sales", "growth_rate"],
-                         title=f"Demand clusters on the first two principal components  ·  PC1 {ev[0]:.1%}, PC2 {ev[1]:.1%}")
-        fig.update_traces(textposition="top center", textfont=dict(size=11), marker=dict(line=dict(color="white", width=1)),
-                          hovertemplate="<b>%{customdata[0]}</b><br>Sales $%{customdata[1]:,.0f}"
-                                        "<br>Growth %{customdata[2]:.0f}%<extra></extra>")
+        fig = px.scatter(sub, x="PC1", y="PC2", color="segment", text="label", color_discrete_map=SEG_COLORS,
+                         size="total_sales", size_max=34, custom_data=["Sub-Category", "total_sales", "growth_rate"])
         pos = {"Bookcases": "bottom center", "Appliances": "top left", "Chairs": "bottom center",
                "Accessories": "bottom center", "Supplies": "bottom center", "Storage": "middle right"}
         for tr in fig.data:
             tr.textposition = [pos.get(n, "top center") for n in sub.loc[sub["segment"] == tr.name, "Sub-Category"]]
-        fig.update_layout(xaxis_title=f"PC1 ({ev[0]:.1%} of variance)", yaxis_title=f"PC2 ({ev[1]:.1%} of variance)")
-        st.plotly_chart(style(fig, height=500), width="stretch")
+        fig.update_traces(textfont=dict(size=12, color=INK), marker=dict(line=dict(color="#fff", width=1.5), opacity=.9),
+                          hovertemplate="<b>%{customdata[0]}</b><br>Sales $%{customdata[1]:,.0f}"
+                                        "<br>Growth %{customdata[2]:.0f}%<extra></extra>")
+        fig.update_layout(xaxis_title="PC1", yaxis_title="PC2")
+        st.plotly_chart(style(fig, height=470), width="stretch")
 
     t = sub[["Sub-Category", "segment", "total_sales", "growth_rate", "volatility", "strategy"]].copy()
-    t.columns = ["Sub-category", "Demand cluster", "Total sales ($)", "Growth 2015→18 (%)", "Monthly volatility ($)",
-                 "Stocking strategy"]
-    t = t.sort_values(["Demand cluster", "Total sales ($)"], ascending=[True, False])
+    t.columns = ["Sub-category", "Cluster", "Total sales", "Growth 2015–18", "Monthly spread", "Stocking rule"]
+    t["Cluster"] = pd.Categorical(t["Cluster"], order)
+    t = t.sort_values(["Cluster", "Total sales"], ascending=[True, False])
+    t["Growth 2015–18"] = t["Growth 2015–18"].map(lambda v: f"{v:+.0f}%")
     with st.container(border=True):
-        st.markdown('<div class="section-title">Sub-category detail</div>', unsafe_allow_html=True)
-        st.dataframe(t.round(1), hide_index=True, width="stretch", height=(len(t) + 1) * 35 + 3,
-                     column_config={"Total sales ($)": st.column_config.NumberColumn(format="$%,.0f"),
-                                    "Monthly volatility ($)": st.column_config.NumberColumn(format="$%,.0f"),
-                                    "Stocking strategy": st.column_config.TextColumn(width="large"),
-                                    "Growth 2015→18 (%)": st.column_config.ProgressColumn(
-                                        format="%.0f%%", min_value=float(min(0, t["Growth 2015→18 (%)"].min())),
-                                        max_value=float(t["Growth 2015→18 (%)"].max()))})
+        panel_head("Sub-category detail", "Monthly spread is the standard deviation of monthly sales")
+        st.dataframe(t, hide_index=True, width="stretch", height=(len(t) + 1) * 35 + 3,
+                     column_config={"Total sales": fmt_money, "Monthly spread": fmt_money,
+                                    "Stocking rule": st.column_config.TextColumn(width="large")})
